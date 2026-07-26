@@ -4,8 +4,8 @@ from zoneinfo import ZoneInfo
 
 from app.config import Settings
 from app.db import get_conn
-from app.models import get_thread, mark_nudged, log_message
-from app.sheet import load_medications, SheetValidationError
+from app.models import get_thread, log_message, mark_nudged
+from app.sheet import SheetValidationError, load_medications
 from app.sms import send_sms
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,8 @@ def run_nudge_check(settings: Settings) -> list[str]:
         meds = load_medications(settings)
     except SheetValidationError as e:
         logger.error("Sheet validation failed, skipping nudge check: %s", e.row_errors)
-        send_sms(settings, f"⚠️ Your med sheet has bad rows, fix and I'll retry tomorrow:\n{'; '.join(e.row_errors)}")
+        errors = "; ".join(e.row_errors)
+        send_sms(settings, f"⚠️ Your med sheet has bad rows, fix and I'll retry tomorrow:\n{errors}")
         return []
 
     today = local_today(settings)
@@ -40,8 +41,9 @@ def run_nudge_check(settings: Settings) -> list[str]:
         for med in meds:
             thread = get_thread(conn, med.med_key)
 
-            if thread is not None and thread.state == "SNOOZED" and thread.snooze_until and today < thread.snooze_until:
-                continue
+            if thread is not None and thread.state == "SNOOZED" and thread.snooze_until:
+                if today < thread.snooze_until:
+                    continue
             if thread is not None and thread.state == "AWAITING_REPLY":
                 continue  # already nudged, waiting on a reply
             if thread is not None and thread.state == "CALLING":

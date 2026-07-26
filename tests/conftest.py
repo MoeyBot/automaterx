@@ -1,5 +1,3 @@
-from datetime import date
-
 import pytest
 
 from app.config import Settings

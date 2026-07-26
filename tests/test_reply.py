@@ -52,9 +52,8 @@ def test_snooze_updates_thread(settings, one_med, monkeypatch):
 def test_question_returns_model_answer(settings, one_med, monkeypatch):
     _seed_awaiting_reply(settings, one_med.med_key)
     monkeypatch.setattr(reply_mod, "load_medications", lambda s: [one_med])
-    monkeypatch.setattr(
-        reply_mod, "classify_reply", lambda *a, **k: Intent(kind="question", answer="You last filled it June 2.")
-    )
+    answer_intent = Intent(kind="question", answer="You last filled it June 2.")
+    monkeypatch.setattr(reply_mod, "classify_reply", lambda *a, **k: answer_intent)
 
     result = reply_mod.handle_inbound_reply(settings, "when did I last fill this?")
     assert result == "You last filled it June 2."

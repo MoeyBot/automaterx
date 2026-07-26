@@ -23,7 +23,10 @@ def handle_inbound_reply(settings: Settings, body: str) -> str:
     try:
         meds = load_medications(settings)
     except SheetValidationError:
-        return "Your med sheet has a problem right now — I'll flag it, but can't look anything up until it's fixed."
+        return (
+            "Your med sheet has a problem right now — I'll flag it, "
+            "but can't look anything up until it's fixed."
+        )
 
     with get_conn(str(settings.db_file)) as conn:
         log_message(conn, None, "in", body)

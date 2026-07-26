@@ -31,7 +31,11 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
     )
     scheduler.start()
-    logger.info("Scheduler started, daily nudge check at %02d:00 %s", settings.nudge_hour_local, settings.timezone)
+    logger.info(
+        "Scheduler started, daily nudge check at %02d:00 %s",
+        settings.nudge_hour_local,
+        settings.timezone,
+    )
 
     yield
 
