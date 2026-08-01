@@ -1,12 +1,12 @@
-from twilio.rest import Client
+from telnyx import Telnyx
 
 from app.config import Settings
 
 
 def send_sms(settings: Settings, body: str, to: str | None = None) -> None:
-    client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
-    client.messages.create(
-        body=body,
-        from_=settings.twilio_from_number,
+    client = Telnyx(api_key=settings.telnyx_api_key)
+    client.messages.send(
+        text=body,
+        from_=settings.telnyx_from_number,
         to=to or settings.owner_phone,
     )

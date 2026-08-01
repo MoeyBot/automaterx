@@ -14,10 +14,10 @@ but it handles your own PHI, so it's built like it matters.
 | Area | Decision |
 |---|---|
 | Rx source of truth | A Google Sheet you maintain by hand |
-| Notification channel | Twilio Programmable Messaging (SMS) |
+| Notification channel | Telnyx Messaging (SMS) |
 | Reply handling | Claude parses free-text intent: **refill**, **snooze**, **question** |
 | Doctor contact | Real outbound voice call with an AI agent |
-| Voice stack | Twilio **ConversationRelay** (Twilio owns STT/TTS/barge-in; Claude owns what to say) |
+| Voice stack | TBD — was Twilio ConversationRelay; needs re-picking against Telnyx's real-time voice API now that SMS has moved off Twilio (M2 hasn't started, see §9 risk 5) |
 | Runtime | Python 3.12 + FastAPI, one always-on container on Fly.io |
 | Identity data | Name / DOB / pharmacy in encrypted app secrets — **never** in the Sheet |
 | Call failures | One attempt. Voicemail fallback. Always text you the outcome + transcript. |
@@ -39,15 +39,14 @@ point on that curve, and neither task is reasoning-hard.
                              │ due soon?
                              ▼
                     ┌──────────────────┐        ┌─────────────┐
-                    │  FastAPI app     │───────▶│   Twilio    │──▶ your phone (SMS)
+                    │  FastAPI app     │───────▶│   Telnyx    │──▶ your phone (SMS)
                     │  (Fly.io)        │◀───────│  Messaging  │◀── your reply
                     │                  │        └─────────────┘
                     │  SQLite (volume) │
                     │  - thread state  │        ┌─────────────┐
-                    │  - call records  │───────▶│ Twilio Voice│──▶ doctor's office
-                    │  - msg log       │◀ ws ──▶│ Conversation│
-                    └────────┬─────────┘        │   Relay     │
-                             │                  └─────────────┘
+                    │  - call records  │───────▶│Voice vendor │──▶ doctor's office
+                    │  - msg log       │◀ ws ──▶│   (TBD)     │
+                    └────────┬─────────┘        └─────────────┘
                              ▼
                       Claude Sonnet 5
                    (intent parse · call turns · outcome summary)
@@ -59,10 +58,10 @@ One process. The websocket for live call audio is why this is a container and no
 
 | Route | Purpose |
 |---|---|
-| `POST /sms/inbound` | Twilio inbound SMS webhook |
-| `POST /voice/twiml` | Returns `<Connect><ConversationRelay url="wss://…">` for the outbound call |
-| `WS /voice/relay` | Live call loop — receives `prompt`/`dtmf`, sends `text`/`sendDigits`/`end` |
-| `POST /voice/status` | Call status callback → triggers outcome summary + SMS |
+| `POST /sms/inbound` | Telnyx inbound SMS webhook |
+| `POST /voice/twiml` *(TBD)* | Returns whatever markup the chosen voice vendor needs for the outbound call |
+| `WS /voice/relay` *(TBD)* | Live call loop — receives `prompt`/`dtmf`, sends `text`/`sendDigits`/`end` |
+| `POST /voice/status` *(TBD)* | Call status callback → triggers outcome summary + SMS |
 | `GET /health` | Fly health check |
 
 ---
@@ -93,7 +92,7 @@ email. Read-only except for the `last_filled` write-back.
 ### SQLite (Fly volume at `/data`)
 
 - **`threads`** — one open conversation per med: `med_key`, `state`, `snooze_until`, `last_nudged_at`
-- **`calls`** — `med_key`, `twilio_call_sid`, `started_at`, `ended_at`, `outcome`, `transcript` (JSON), `summary`
+- **`calls`** — `med_key`, `provider_call_sid`, `started_at`, `ended_at`, `outcome`, `transcript` (JSON), `summary`
 - **`messages`** — every SMS in and out, for context and for debugging what the model saw
 
 ### Thread state machine
@@ -117,7 +116,8 @@ losing the pending decision.
 > Lisinopril 10mg runs out in 7 days (Sep 1). Want me to call Dr. Reyes for a refill?
 
 **Inbound handling:**
-1. Validate the `X-Twilio-Signature` header. Reject anything that fails.
+1. Validate the Telnyx webhook signature (Ed25519, `telnyx-signature-ed25519` /
+   `telnyx-timestamp` headers). Reject anything that fails.
 2. Reject any sender that isn't `OWNER_PHONE`. Non-negotiable — this number can trigger phone
    calls that disclose your DOB, so it answers to exactly one handset.
 3. Load the open thread + recent message history.
@@ -134,9 +134,16 @@ Only your reply triggers a call. The system never dials on its own initiative.
 
 ## 5. The voice agent
 
+*Not started (M2). This section predates the move off Twilio for SMS — the safety design
+below (fact sheet, disclosure, recording, phone trees, voicemail, after-call summary) is
+vendor-agnostic and still holds, but the call-setup mechanics were written against Twilio
+ConversationRelay specifically and need to be re-picked against Telnyx's real-time voice API
+(or another vendor) before M2 starts.*
+
 ### Call setup
-Outbound call via the REST API with `machineDetection="DetectMessageEnd"`, pointing at
-`/voice/twiml`, which returns `<Connect><ConversationRelay url="wss://…/voice/relay" welcomeGreeting="…">`.
+Outbound call via the voice vendor's REST API with answering-machine detection enabled,
+pointing at `/voice/twiml`, which connects the call to `/voice/relay` for the live audio
+session — the exact request/response shape depends on which voice vendor gets picked.
 
 ### The fact sheet — the core safety mechanism
 Before the call, the app assembles a **closed set of facts** the agent is permitted to state:
@@ -161,11 +168,11 @@ robots that pretend otherwise, and some states require it.
 
 ### Recording
 Off by default. Two-party consent states cover the office too, and you don't need the audio —
-you get the transcript from ConversationRelay for free.
+you get the transcript from the voice vendor for free.
 
 ### Phone trees
-ConversationRelay delivers transcribed IVR audio as `prompt` messages; the agent responds with
-`sendDigits` (`digits` accepts `0-9`, `w`, `#`, `*` — `w` is a ~0.5s pause). `phone_tree_hint`
+The voice vendor delivers transcribed IVR audio as `prompt` messages; the agent responds with
+DTMF digits (`0-9`, `w`, `#`, `*` — `w` is a ~0.5s pause). `phone_tree_hint`
 in the Sheet lets you hard-code a known path once you've learned it, skipping the guesswork.
 
 ### Voicemail
@@ -185,11 +192,12 @@ say "try again" — which just re-queues it.
 
 ## 6. Security
 
-- Twilio signature validation on `/sms/inbound`, `/voice/twiml`, `/voice/status`
+- Webhook signature validation on `/sms/inbound` (Telnyx Ed25519) and, once picked, whatever
+  the voice vendor uses for `/voice/twiml` and `/voice/status`
 - Websocket authenticated by a signed one-time token in the `wss://` URL, bound to the call SID
 - Single-number allowlist for anything that causes an action
 - Secrets via `fly secrets` (`OWNER_PHONE`, `PATIENT_NAME`, `PATIENT_DOB`, `PHARMACY_*`,
-  `TWILIO_*`, `ANTHROPIC_API_KEY`, `GOOGLE_SA_JSON`) — never committed, never in the Sheet
+  `TELNYX_*`, `ANTHROPIC_API_KEY`, `GOOGLE_SA_JSON`) — never committed, never in the Sheet
 - DOB and med names redacted from application logs; full detail only in the SQLite `calls` row
 - A hard cap on outbound calls per day, so a bug can't dial a doctor's office forty times
 
@@ -200,7 +208,7 @@ say "try again" — which just re-queues it.
 ### M1 — SMS loop (target: usable in a couple of evenings)
 1. FastAPI skeleton, Fly app + volume, health check
 2. `gspread` reader + `runs_out` computation + local test fixture
-3. APScheduler daily job → nudge SMS via Twilio
+3. APScheduler daily job → nudge SMS via Telnyx
 4. `/sms/inbound` with signature validation + sender allowlist
 5. Claude intent parser → `request_refill` / `snooze` / `question` / `unclear`
 6. Snooze persistence; Q&A answered from Sheet data
@@ -210,14 +218,16 @@ say "try again" — which just re-queues it.
 **Done when:** you get a real text, reply "not yet, remind me Friday", and it does.
 
 ### M2 — voice
-1. Outbound call + `/voice/twiml` returning ConversationRelay TwiML
+0. Pick a voice vendor (Telnyx real-time voice API vs. raw Media Streams + STT/TTS vs.
+   something else) — deferred from §1 pending that decision.
+1. Outbound call + `/voice/twiml` returning whatever call-control markup the chosen vendor needs
 2. `/voice/relay` websocket: handle `setup`/`prompt`/`dtmf`/`interrupt`/`error`,
    send `text`/`sendDigits`/`end`
 3. Fact-sheet system prompt + the refuse-to-improvise rule
-4. AMD → voicemail script branch
+4. Answering-machine detection → voicemail script branch
 5. `/voice/status` → transcript summary → outcome SMS → Sheet write-back
 6. **Test against a phone number you control before any real office.** Record a fake IVR on a
-   second Twilio number and make the agent navigate it.
+   second number and make the agent navigate it.
 
 ### M3 — hardening
 Structured logging, call-volume cap, Sheet schema validation with a clear error SMS on bad rows,
@@ -230,9 +240,9 @@ graceful behavior when the Sheet is unreachable.
 | Item | Rough |
 |---|---|
 | Fly.io shared-cpu-1x + small volume | ~$3–5/mo |
-| Twilio phone number | ~$1.15/mo |
-| SMS | ~$0.0079 each — pennies/mo at this volume |
-| Voice + ConversationRelay | per-minute voice plus a ConversationRelay per-minute rate — **check current pricing**, it dominates everything else here |
+| Telnyx phone number | ~$1/mo |
+| SMS | a fraction of a cent each — pennies/mo at this volume |
+| Voice (vendor TBD) | per-minute voice plus whatever the real-time/AI layer costs — **check current pricing** once a vendor is picked, it dominates everything else here |
 | Claude Sonnet 5 tokens | negligible at this volume |
 
 Realistically a few dollars a month plus whatever the calls cost.
@@ -251,11 +261,13 @@ Realistically a few dollars a month plus whatever the calls cost.
    business hours only.
 4. **DOB in environment secrets** is a real if small exposure — anyone with Fly access to the app
    has it. Acceptable for a personal tool; would not be for anything shared.
-5. **ConversationRelay is Twilio-proprietary.** If it's ever deprecated, the escape hatch is raw
-   Media Streams with Deepgram + a TTS provider — same architecture, more plumbing.
+5. **Vendor lock-in on the voice stack.** SMS already moved once (Twilio → Telnyx, over A2P
+   10DLC campaign-registration friction), so the voice vendor pick in §7's M2-step-0 should
+   favor one with an escape hatch — e.g. raw media streaming + a separate STT/TTS provider —
+   over a fully proprietary managed pipeline.
 
 ---
 
 ## 10. First step
 
-`git init`, FastAPI skeleton, Twilio number provisioned, and a Sheet with one row in it.
+`git init`, FastAPI skeleton, Telnyx number provisioned, and a Sheet with one row in it.

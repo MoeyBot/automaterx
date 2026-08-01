@@ -16,9 +16,9 @@ class Settings(BaseSettings):
     pharmacy_phone: str
     pharmacy_address: str = ""
 
-    twilio_account_sid: str
-    twilio_auth_token: str
-    twilio_from_number: str  # the app's Twilio number, E.164
+    telnyx_api_key: str
+    telnyx_public_key: str  # Ed25519 public key from Mission Control, verifies inbound webhooks
+    telnyx_from_number: str  # the app's Telnyx number, E.164
 
     anthropic_api_key: str
 

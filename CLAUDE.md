@@ -6,10 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A single-user SMS (and eventually voice) agent: it reads a Google Sheet of prescriptions,
 texts the owner when a refill date is approaching, classifies their free-text reply with
-Claude, and (in M2) will place an outbound call via Twilio ConversationRelay to request the
-refill. See [PLAN.md](PLAN.md) for the full design, milestone breakdown, and rationale behind
-key decisions (why ConversationRelay, why identity data lives in env secrets and never the
-Sheet, why calls aren't retried automatically, etc.) — read it before making architectural
+Claude, and (in M2) will place an outbound call to request the refill — the voice vendor is
+still TBD (see PLAN.md §5, §9 risk 5). See [PLAN.md](PLAN.md) for the full design, milestone
+breakdown, and rationale behind key decisions (why identity data lives in env secrets and never
+the Sheet, why calls aren't retried automatically, etc.) — read it before making architectural
 changes.
 
 Currently at M1: the SMS loop is fully wired end to end. The `request_refill` intent is
@@ -53,16 +53,19 @@ re-nudging something already awaiting reply/snoozed/calling → sends SMS via `a
 `app/models.py: mark_nudged` flips the thread to `AWAITING_REPLY`.
 
 **Data flow for a reply:**
-Twilio POSTs to `/sms/inbound` (`app/main.py`) → Twilio signature validated → sender must
-equal `OWNER_PHONE` exactly, or the response is a deliberately empty TwiML (no confirmation
-that the number is live) → `app/reply.py: handle_inbound_reply` re-reads the Sheet fresh (not
-cached), resolves `get_active_thread` (the thread `AWAITING_REPLY`, or else whatever thread was
-most recently touched — so a bare question still resolves to the right medication) →
-`app/intent.py: classify_reply` calls Claude with a forced tool call (`tool_choice`) to
-classify into `request_refill` / `snooze` / `question` / `unclear` → the corresponding branch
-in `handle_inbound_reply` mutates thread state and builds the reply text → `handle_inbound_reply`
-returns plain text; `app/main.py` is the only place that wraps it in TwiML. Every inbound and
-outbound body is logged to the `messages` table via `log_message`.
+Telnyx POSTs a `message.received` webhook to `/sms/inbound` (`app/main.py`) → the Ed25519
+signature is verified against `TELNYX_PUBLIC_KEY` → sender must equal `OWNER_PHONE` exactly, or
+the handler just returns 200 without sending anything back (no confirmation that the number is
+live) → `app/reply.py: handle_inbound_reply` re-reads the Sheet fresh (not cached), resolves
+`get_active_thread` (the thread `AWAITING_REPLY`, or else whatever thread was most recently
+touched — so a bare question still resolves to the right medication) → `app/intent.py:
+classify_reply` calls Claude with a forced tool call (`tool_choice`) to classify into
+`request_refill` / `snooze` / `question` / `unclear` → the corresponding branch in
+`handle_inbound_reply` mutates thread state and builds the reply text → `handle_inbound_reply`
+returns plain text; `app/main.py` is the only place that sends it back out, via `app/sms.py:
+send_sms` (Telnyx webhooks are fire-and-forget notifications, not request/response, so the
+reply is always a separate outbound API call rather than something returned in the webhook
+response). Every inbound and outbound body is logged to the `messages` table via `log_message`.
 
 **Two things load fresh every request rather than being cached:** the Sheet (so an edit takes
 effect on the next text, not the next deploy) and the thread lookup (so state changes from a
@@ -98,9 +101,9 @@ loosening it for convenience.
 
 - `tests/conftest.py` provides a `settings` fixture (writes a fresh SQLite file per test via
   `tmp_path`) and a `one_med` fixture (one valid parsed `Medication`).
-- External calls are never hit in tests: `app.sms.send_sms` (Twilio), `app.intent.classify_reply`
+- External calls are never hit in tests: `app.sms.send_sms` (Telnyx), `app.intent.classify_reply`
   (Anthropic), and `app.sheet.load_medications` (gspread) are monkeypatched at the module level
   in the test file that needs them (see `tests/test_reply.py`, `tests/test_main.py`) rather than
   mocked via a fixture — follow that pattern for new tests in the same area.
-- `app/main.py`'s dependencies (`get_settings`, `_validate_twilio_request`, `handle_inbound_reply`)
-  are patched directly on `main_mod` for the same reason.
+- `app/main.py`'s dependencies (`get_settings`, `_verify_telnyx_webhook`, `handle_inbound_reply`,
+  `send_sms`) are patched directly on `main_mod` for the same reason.

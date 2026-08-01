@@ -12,14 +12,14 @@ CREATE TABLE IF NOT EXISTS threads (
 );
 
 CREATE TABLE IF NOT EXISTS calls (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    med_key         TEXT NOT NULL,
-    twilio_call_sid TEXT,
-    started_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    ended_at        TEXT,
-    outcome         TEXT,
-    transcript      TEXT,
-    summary         TEXT
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    med_key            TEXT NOT NULL,
+    provider_call_sid  TEXT,
+    started_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    ended_at           TEXT,
+    outcome            TEXT,
+    transcript         TEXT,
+    summary            TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
