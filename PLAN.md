@@ -17,7 +17,7 @@ but it handles your own PHI, so it's built like it matters.
 | Notification channel | Telnyx Messaging (SMS) |
 | Reply handling | Claude parses free-text intent: **refill**, **snooze**, **question** |
 | Doctor contact | Real outbound voice call with an AI agent |
-| Voice stack | TBD — was Twilio ConversationRelay; needs re-picking against Telnyx's real-time voice API now that SMS has moved off Twilio (M2 hasn't started, see §9 risk 5) |
+| Voice stack | Telnyx Conversation Relay — same vendor as SMS, same shape as the original Twilio pick (Telnyx owns STT/TTS/DTMF/interruption over a websocket; Claude decides what to say) |
 | Runtime | Python 3.12 + FastAPI, one always-on container on Fly.io |
 | Identity data | Name / DOB / pharmacy in encrypted app secrets — **never** in the Sheet |
 | Call failures | One attempt. Voicemail fallback. Always text you the outcome + transcript. |
@@ -44,9 +44,10 @@ point on that curve, and neither task is reasoning-hard.
                     │                  │        └─────────────┘
                     │  SQLite (volume) │
                     │  - thread state  │        ┌─────────────┐
-                    │  - call records  │───────▶│Voice vendor │──▶ doctor's office
-                    │  - msg log       │◀ ws ──▶│   (TBD)     │
-                    └────────┬─────────┘        └─────────────┘
+                    │  - call records  │───────▶│   Telnyx    │──▶ doctor's office
+                    │  - msg log       │◀ ws ──▶│Conversation │
+                    └────────┬─────────┘        │   Relay     │
+                             │                   └─────────────┘
                              ▼
                       Claude Sonnet 5
                    (intent parse · call turns · outcome summary)
@@ -59,9 +60,8 @@ One process. The websocket for live call audio is why this is a container and no
 | Route | Purpose |
 |---|---|
 | `POST /sms/inbound` | Telnyx inbound SMS webhook |
-| `POST /voice/twiml` *(TBD)* | Returns whatever markup the chosen voice vendor needs for the outbound call |
-| `WS /voice/relay` *(TBD)* | Live call loop — receives `prompt`/`dtmf`, sends `text`/`sendDigits`/`end` |
-| `POST /voice/status` *(TBD)* | Call status callback → triggers outcome summary + SMS |
+| `WS /voice/relay` | Conversation Relay's live call loop — receives `setup`/`prompt`/`dtmf`, sends `text`/`sendDigits`/`end` (embedded in the `dial()` call, no separate call-control markup endpoint needed) |
+| `POST /voice/status` | Call Control webhook (`call.answered`, `call.hangup`, AMD result, etc.) → triggers outcome summary + SMS |
 | `GET /health` | Fly health check |
 
 ---
@@ -134,16 +134,16 @@ Only your reply triggers a call. The system never dials on its own initiative.
 
 ## 5. The voice agent
 
-*Not started (M2). This section predates the move off Twilio for SMS — the safety design
-below (fact sheet, disclosure, recording, phone trees, voicemail, after-call summary) is
-vendor-agnostic and still holds, but the call-setup mechanics were written against Twilio
-ConversationRelay specifically and need to be re-picked against Telnyx's real-time voice API
-(or another vendor) before M2 starts.*
+*Not started (M2). Voice vendor is now decided: Telnyx Conversation Relay. The safety design
+below (fact sheet, disclosure, recording, phone trees, voicemail, after-call summary) was
+written vendor-agnostically and still holds unchanged from the original Twilio-based design.*
 
 ### Call setup
-Outbound call via the voice vendor's REST API with answering-machine detection enabled,
-pointing at `/voice/twiml`, which connects the call to `/voice/relay` for the live audio
-session — the exact request/response shape depends on which voice vendor gets picked.
+`client.calls.dial(...)` with `answering_machine_detection` set (e.g. `"detect"`) and
+`conversation_relay_config={"url": "wss://.../voice/relay", "dtmf_detection": True, "greeting": ...}`
+embedded directly in the dial call — no separate call-control-markup fetch step, unlike
+Twilio's TwiML model. `webhook_url` on the same call gets call status events
+(`call.answered`, `call.hangup`, AMD result) delivered to `/voice/status`.
 
 ### The fact sheet — the core safety mechanism
 Before the call, the app assembles a **closed set of facts** the agent is permitted to state:
@@ -171,9 +171,10 @@ Off by default. Two-party consent states cover the office too, and you don't nee
 you get the transcript from the voice vendor for free.
 
 ### Phone trees
-The voice vendor delivers transcribed IVR audio as `prompt` messages; the agent responds with
-DTMF digits (`0-9`, `w`, `#`, `*` — `w` is a ~0.5s pause). `phone_tree_hint`
-in the Sheet lets you hard-code a known path once you've learned it, skipping the guesswork.
+Telnyx delivers transcribed IVR audio as `prompt` messages over the `/voice/relay` websocket;
+the agent responds with a `sendDigits` message (`0-9`, `w`, `#`, `*` — `w` is a pause).
+`phone_tree_hint` in the Sheet lets you hard-code a known path once you've learned it, skipping
+the guesswork.
 
 ### Voicemail
 If AMD reports a machine, the agent skips the conversational flow and reads a fixed voicemail
@@ -192,9 +193,12 @@ say "try again" — which just re-queues it.
 
 ## 6. Security
 
-- Webhook signature validation on `/sms/inbound` (Telnyx Ed25519) and, once picked, whatever
-  the voice vendor uses for `/voice/twiml` and `/voice/status`
-- Websocket authenticated by a signed one-time token in the `wss://` URL, bound to the call SID
+- Webhook signature validation on `/sms/inbound` and `/voice/status` — Telnyx signs all
+  webhooks the same way (Ed25519), so `_verify_telnyx_webhook` in `app/main.py` should cover
+  both once voice lands, not need a second implementation
+- `/voice/relay` websocket authenticated by a signed one-time token in the `wss://` URL, bound
+  to the call's `call_control_id` — Conversation Relay doesn't sign the websocket connection
+  itself, so this token is on us to generate and check
 - Single-number allowlist for anything that causes an action
 - Secrets via `fly secrets` (`OWNER_PHONE`, `PATIENT_NAME`, `PATIENT_DOB`, `PHARMACY_*`,
   `TELNYX_*`, `ANTHROPIC_API_KEY`, `GOOGLE_SA_JSON`) — never committed, never in the Sheet
@@ -218,14 +222,13 @@ say "try again" — which just re-queues it.
 **Done when:** you get a real text, reply "not yet, remind me Friday", and it does.
 
 ### M2 — voice
-0. Pick a voice vendor (Telnyx real-time voice API vs. raw Media Streams + STT/TTS vs.
-   something else) — deferred from §1 pending that decision.
-1. Outbound call + `/voice/twiml` returning whatever call-control markup the chosen vendor needs
+1. `client.calls.dial()` with `conversation_relay_config` pointed at `/voice/relay` and
+   `answering_machine_detection` enabled; `webhook_url` pointed at `/voice/status`
 2. `/voice/relay` websocket: handle `setup`/`prompt`/`dtmf`/`interrupt`/`error`,
    send `text`/`sendDigits`/`end`
 3. Fact-sheet system prompt + the refuse-to-improvise rule
-4. Answering-machine detection → voicemail script branch
-5. `/voice/status` → transcript summary → outcome SMS → Sheet write-back
+4. AMD result on `/voice/status` → voicemail script branch (skip the conversational flow)
+5. `call.hangup` on `/voice/status` → transcript summary → outcome SMS → Sheet write-back
 6. **Test against a phone number you control before any real office.** Record a fake IVR on a
    second number and make the agent navigate it.
 
@@ -242,7 +245,7 @@ graceful behavior when the Sheet is unreachable.
 | Fly.io shared-cpu-1x + small volume | ~$3–5/mo |
 | Telnyx phone number | ~$1/mo |
 | SMS | a fraction of a cent each — pennies/mo at this volume |
-| Voice (vendor TBD) | per-minute voice plus whatever the real-time/AI layer costs — **check current pricing** once a vendor is picked, it dominates everything else here |
+| Voice (Telnyx Conversation Relay) | per-minute voice plus the Conversation Relay rate — **check current pricing before M2 goes live**, it dominates everything else here |
 | Claude Sonnet 5 tokens | negligible at this volume |
 
 Realistically a few dollars a month plus whatever the calls cost.
@@ -262,9 +265,9 @@ Realistically a few dollars a month plus whatever the calls cost.
 4. **DOB in environment secrets** is a real if small exposure — anyone with Fly access to the app
    has it. Acceptable for a personal tool; would not be for anything shared.
 5. **Vendor lock-in on the voice stack.** SMS already moved once (Twilio → Telnyx, over A2P
-   10DLC campaign-registration friction), so the voice vendor pick in §7's M2-step-0 should
-   favor one with an escape hatch — e.g. raw media streaming + a separate STT/TTS provider —
-   over a fully proprietary managed pipeline.
+   10DLC campaign-registration friction). Conversation Relay is Telnyx-proprietary; the escape
+   hatch if it's ever a problem is raw Media Streams on the same Telnyx account + a separate
+   STT/TTS provider — same account, no second migration, just more plumbing.
 
 ---
 

@@ -6,15 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A single-user SMS (and eventually voice) agent: it reads a Google Sheet of prescriptions,
 texts the owner when a refill date is approaching, classifies their free-text reply with
-Claude, and (in M2) will place an outbound call to request the refill — the voice vendor is
-still TBD (see PLAN.md §5, §9 risk 5). See [PLAN.md](PLAN.md) for the full design, milestone
-breakdown, and rationale behind key decisions (why identity data lives in env secrets and never
-the Sheet, why calls aren't retried automatically, etc.) — read it before making architectural
-changes.
+Claude, and (in M2) will place an outbound call via Telnyx Conversation Relay to request the
+refill. See [PLAN.md](PLAN.md) for the full design, milestone breakdown, and rationale behind
+key decisions (why identity data lives in env secrets and never the Sheet, why calls aren't
+retried automatically, etc.) — read it before making architectural changes.
 
-Currently at M1: the SMS loop is fully wired end to end. The `request_refill` intent is
-stubbed — it confirms what it *would* do instead of placing a real call — so voice (M2) can be
-built on a proven decision path.
+M1 (the SMS loop) is complete and proven end to end against real phone numbers — nudge, reply,
+Claude classification, thread state transitions, and confirmation all verified working. The
+`request_refill` intent is still stubbed — it confirms what it *would* do instead of placing a
+real call — so M2 (voice) starts from a proven decision path rather than an unproven one.
 
 ## Commands
 

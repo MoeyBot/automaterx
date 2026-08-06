@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     telnyx_api_key: str
     telnyx_public_key: str  # Ed25519 public key from Mission Control, verifies inbound webhooks
     telnyx_from_number: str  # the app's Telnyx number, E.164
+    telnyx_connection_id: str = ""  # Call Control Application ID — only needed for M2 (voice)
+
+    # Signs the one-time token in the /voice/relay wss:// URL, binding it to a call_control_id.
+    # Generated locally (e.g. `python -c "import secrets; print(secrets.token_hex(32))"`) —
+    # not a third-party credential, just needs to be a stable secret only this app knows.
+    relay_signing_secret: str = ""
 
     anthropic_api_key: str
 
