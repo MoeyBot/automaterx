@@ -5,7 +5,13 @@ from telnyx.lib.webhooks_ed25519 import WebhookVerificationError
 
 import app.main as main_mod
 from app.db import get_conn
-from app.voice import DISCLOSURE_GREETING, CallAction, CallSummary, sign_relay_token
+from app.voice import (
+    DISCLOSURE_GREETING,
+    INTERRUPTION_MARKER,
+    CallAction,
+    CallSummary,
+    sign_relay_token,
+)
 
 
 def _event(from_number: str, text: str):
@@ -135,3 +141,34 @@ def test_relay_logs_outcome_sms_to_messages_table(settings, one_med, monkeypatch
 
     assert [r["body"] for r in rows] == sent, "the outcome SMS must be logged like every other body"
     assert rows[0]["direction"] == "out"
+
+
+def test_relay_interrupt_frame_reaches_the_transcript(settings, one_med, monkeypatch):
+    """A barge-in must reach the model as context, not be silently dropped — the greeting
+    is what gets interrupted in practice, and it carries the disclosure."""
+    seen = []
+
+    def _next_action(s, med, turns, caller_text):
+        seen.append(list(turns))
+        return CallAction(action="end_call")
+
+    monkeypatch.setattr(main_mod, "next_call_action", _next_action)
+    summary = CallSummary(outcome="refused", detail="No.")
+    sent = []
+    client = _relay_client(settings, one_med, monkeypatch, None, summary, sent)
+
+    with client.websocket_connect(_relay_url(settings, one_med)) as ws:
+        ws.send_json({"type": "setup", "call_control_id": "ccid-3"})
+        ws.send_json(
+            {
+                "type": "interrupt",
+                "durationUntilInterruptMs": 341,
+                "utteranceUntilInterrupt": "Hi, this is an auto",
+            }
+        )
+        ws.send_json({"type": "prompt", "last": True, "voicePrompt": "Who is this?"})
+        ws.receive_json()
+
+    assert len(seen) == 1
+    greeting_turn = seen[0][0]
+    assert greeting_turn["content"] == f"Hi, this is an auto {INTERRUPTION_MARKER}"

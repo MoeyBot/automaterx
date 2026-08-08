@@ -170,6 +170,34 @@ def is_usable_utterance(text: str, last_spoken: str | None) -> bool:
     return True
 
 
+INTERRUPTION_MARKER = "[cut off here — the caller barged in and may not have heard the rest]"
+
+
+def apply_interruption(turns: list[dict], delivered: str | None) -> None:
+    """Records that the caller talked over our last line, so the transcript reflects what
+    they plausibly heard rather than what we queued up to say.
+
+    Without this the model reasons as though it delivered a full sentence the other party
+    may have heard three words of — and then never repeats the information, because as far
+    as it knows it already said it.
+
+    `delivered` is Telnyx's `utteranceUntilInterrupt`, whose exact semantics are unconfirmed:
+    on the 2026-08-08 call it carried the *complete* greeting alongside
+    durationUntilInterruptMs=341, far too short to have spoken it, so it is either the
+    delivered portion or the whole interrupted utterance. Telnyx's own example app only logs
+    the event without reading the field. Rather than guess, keep whichever text is shorter —
+    that is correct under either reading, since it never claims the caller heard more than
+    they did.
+    """
+    last = next((t for t in reversed(turns) if t["role"] == "assistant"), None)
+    if last is None or INTERRUPTION_MARKER in last["content"]:
+        return
+    spoken = last["content"]
+    delivered = (delivered or "").strip()
+    text = delivered if delivered and len(delivered) < len(spoken) else spoken
+    last["content"] = f"{text} {INTERRUPTION_MARKER}"
+
+
 def _format_turns(turns: list[dict]) -> str:
     return "\n".join(f"{'You' if t['role'] == 'assistant' else 'Them'}: {t['content']}" for t in turns)
 

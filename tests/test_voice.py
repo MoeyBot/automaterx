@@ -3,6 +3,8 @@ from types import SimpleNamespace
 import app.voice as voice_mod
 from app.db import get_conn
 from app.voice import (
+    INTERRUPTION_MARKER,
+    apply_interruption,
     build_fact_sheet,
     build_relay_url,
     is_usable_utterance,
@@ -109,3 +111,49 @@ def test_usable_utterance_lets_short_echoes_through():
     # "yes" appearing in our own last line must not suppress a real "yes" from the caller —
     # dropping a genuine answer is worse than acting on an echo.
     assert is_usable_utterance("yes", "Is that a yes?")
+
+
+def test_interruption_truncates_to_what_the_caller_heard():
+    turns = [{"role": "assistant", "content": "Hi, this is an automated assistant calling about a refill."}]
+    apply_interruption(turns, "Hi, this is an auto")
+    assert turns[0]["content"] == f"Hi, this is an auto {INTERRUPTION_MARKER}"
+
+
+def test_interruption_keeps_full_text_when_delivered_is_not_shorter():
+    """The live 2026-08-08 frame carried the *complete* greeting as utteranceUntilInterrupt.
+    Under that reading we must not lengthen or invent text — only flag the barge-in."""
+    greeting = "Hi, this is an automated assistant calling on behalf of Laura Ortega."
+    turns = [{"role": "assistant", "content": greeting}]
+    apply_interruption(turns, greeting)
+    assert turns[0]["content"] == f"{greeting} {INTERRUPTION_MARKER}"
+
+
+def test_interruption_handles_missing_field():
+    turns = [{"role": "assistant", "content": "Some line."}]
+    apply_interruption(turns, None)
+    assert turns[0]["content"] == f"Some line. {INTERRUPTION_MARKER}"
+
+
+def test_interruption_marks_the_last_assistant_turn_only():
+    turns = [
+        {"role": "assistant", "content": "First line."},
+        {"role": "user", "content": "Hello."},
+        {"role": "assistant", "content": "Second line."},
+    ]
+    apply_interruption(turns, "Second")
+    assert turns[0]["content"] == "First line."
+    assert turns[2]["content"] == f"Second {INTERRUPTION_MARKER}"
+
+
+def test_interruption_is_not_applied_twice_to_one_utterance():
+    turns = [{"role": "assistant", "content": "A line."}]
+    apply_interruption(turns, "A")
+    once = turns[0]["content"]
+    apply_interruption(turns, "A")
+    assert turns[0]["content"] == once
+
+
+def test_interruption_before_any_assistant_turn_is_a_noop():
+    turns: list[dict] = []
+    apply_interruption(turns, "anything")
+    assert turns == []

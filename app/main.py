@@ -26,6 +26,7 @@ from app.sms import send_sms
 from app.voice import (
     DISCLOSURE_GREETING,
     VOICEMAIL_SCRIPT,
+    apply_interruption,
     is_usable_utterance,
     next_call_action,
     summarize_call,
@@ -270,11 +271,18 @@ async def voice_relay(websocket: WebSocket):
                 digit = msg.get("digit") or msg.get("digits") or ""
                 turns.append({"role": "user", "content": f"[caller pressed {digit}]"})
 
+            elif msg_type == "interrupt":
+                # The caller talked over our TTS. There's nothing queued to cancel, but the
+                # transcript must not keep claiming we delivered a line they cut off — see
+                # apply_interruption. Observed live: the callee barged in 341ms into the
+                # greeting, i.e. over the disclosure itself.
+                apply_interruption(turns, msg.get("utteranceUntilInterrupt"))
+                if turns and turns[-1]["role"] == "assistant":
+                    last_spoken = turns[-1]["content"]
+
             elif msg_type == "error":
                 logger.error("Conversation Relay reported an error: %s", msg)
                 break
-
-            # "interrupt" needs no handling for v1 — nothing queued to cancel.
 
     except WebSocketDisconnect:
         pass
