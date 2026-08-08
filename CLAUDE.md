@@ -6,15 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A single-user SMS (and eventually voice) agent: it reads a Google Sheet of prescriptions,
 texts the owner when a refill date is approaching, classifies their free-text reply with
-Claude, and (in M2) will place an outbound call to request the refill — the voice vendor is
-still TBD (see PLAN.md §5, §9 risk 5). See [PLAN.md](PLAN.md) for the full design, milestone
-breakdown, and rationale behind key decisions (why identity data lives in env secrets and never
-the Sheet, why calls aren't retried automatically, etc.) — read it before making architectural
-changes.
+Claude, and (in M2) will place an outbound call via Telnyx Conversation Relay to request the
+refill. See [PLAN.md](PLAN.md) for the full design, milestone breakdown, and rationale behind
+key decisions (why identity data lives in env secrets and never the Sheet, why calls aren't
+retried automatically, etc.) — read it before making architectural changes.
 
-Currently at M1: the SMS loop is fully wired end to end. The `request_refill` intent is
-stubbed — it confirms what it *would* do instead of placing a real call — so voice (M2) can be
-built on a proven decision path.
+M1 (the SMS loop) is complete and proven end to end against real phone numbers — nudge, reply,
+Claude classification, thread state transitions, and confirmation all verified working. The
+`request_refill` intent is still stubbed — it confirms what it *would* do instead of placing a
+real call — so M2 (voice) starts from a proven decision path rather than an unproven one.
 
 ## Commands
 
@@ -72,6 +72,24 @@ effect on the next text, not the next deploy) and the thread lookup (so state ch
 prior message are visible immediately). Don't introduce caching here without checking that
 tradeoff against PLAN.md's reasoning.
 
+**Data flow for a refill call (M2, code written but not yet tested live — see PLAN.md §5):**
+`app/reply.py`'s `request_refill` branch calls `app/voice.py: place_refill_call`, which places
+the call via `client.calls.dial()` with `conversation_relay_config` embedded directly (no
+TwiML-style markup fetch) and inserts a `calls` row. The websocket URL passed to Telnyx is
+signed with `sign_relay_token` — bound to a locally-minted `rid` + `med_key` rather than
+Telnyx's `call_control_id`, since that ID isn't known until *after* `dial()` returns, but the
+URL has to be ready *before* dialing. `WS /voice/relay` in `app/main.py` verifies that token,
+then loops on Telnyx's `prompt`/`dtmf`/`error` messages, calling `app/voice.py:
+next_call_action` (same forced-tool-call, serialize-history-as-text pattern as
+`classify_reply`) to decide `speak` / `press_digits` / `end_call` each turn. `POST
+/voice/status` handles the AMD result — if Telnyx flags a machine, it either tells an
+already-connected `/voice/relay` websocket (tracked in the in-process `_active_relays` dict) to
+read the fixed `VOICEMAIL_SCRIPT` and hang up, or sets an interim `outcome='voicemail'` on the
+`calls` row for `/voice/relay` to pick up if it connects afterward. When the call ends,
+`app/voice.py: summarize_call` classifies the outcome from the transcript, `finish_call`
+persists it, a confirmed `sent_to_pharmacy` writes `last_filled` back to the Sheet, and the
+owner gets a text either way.
+
 **The Sheet boundary (`app/sheet.py`):** `parse_records` is a pure function from raw
 `dict` rows to validated `Medication` objects, deliberately separated from the gspread client
 (`load_medications`) so sheet-shape tests don't need live Google credentials — this is why
@@ -93,9 +111,9 @@ DOB alongside it.
 **Claude's role is intentionally narrow and fact-gated:** `app/intent.py`'s system prompt
 builds its context (`_build_context`) from *only* the fields on the `Medication` object, and
 explicitly instructs the model not to invent facts or give medical advice beyond that context.
-When extending what the model can say (e.g., in the M2 voice agent), preserve this pattern — a
-closed fact sheet plus an explicit instruction to refuse rather than improvise — rather than
-loosening it for convenience.
+`app/voice.py`'s `build_fact_sheet` / `CALL_SYSTEM_PROMPT` follow the same pattern for the M2
+call agent — a closed fact sheet plus an explicit instruction to refuse rather than improvise.
+Preserve this rather than loosening it for convenience when touching either.
 
 ## Testing conventions
 
