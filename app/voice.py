@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import logging
+import re
 import secrets
 from typing import Literal
 
@@ -138,6 +139,35 @@ def _call_system_prompt(settings: Settings, med: Medication) -> str:
         pharmacy_phone=settings.pharmacy_phone,
         phone_tree_hint_note=hint_note,
     )
+
+
+_FILLER_WORDS = {"uh", "um", "umm", "mm", "mmm", "hm", "hmm", "ah", "er", "eh"}
+
+
+def _normalize(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9 ]", " ", text.lower()).split())
+
+
+def is_usable_utterance(text: str, last_spoken: str | None) -> bool:
+    """Whether a final `prompt` frame is real caller speech worth acting on.
+
+    The ASR emits fragments (a live call produced bare `"to"` as its own final frame) and can
+    pick up our own outbound audio. Every accepted utterance costs a model call and an awkward
+    pause on a real office call, so these are worth dropping — but short answers ("yes",
+    "speaking") are legitimate here, so this filters on content, never on length.
+
+    Echo suppression only applies at 3+ words: a one-word "yes" may genuinely also appear
+    inside our own last line, and dropping a real answer is worse than acting on an echo.
+    """
+    normalized = _normalize(text)
+    if not normalized:
+        return False
+    words = normalized.split()
+    if all(word in _FILLER_WORDS for word in words):
+        return False
+    if last_spoken and len(words) >= 3 and normalized in _normalize(last_spoken):
+        return False
+    return True
 
 
 def _format_turns(turns: list[dict]) -> str:

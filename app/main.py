@@ -11,12 +11,26 @@ from telnyx.lib.webhooks_ed25519 import WebhookVerificationError, unwrap_with_ed
 
 from app.config import Settings, get_settings
 from app.db import get_conn, init_db
-from app.models import Medication, finish_call, get_call, set_call_outcome, upsert_thread_state
+from app.models import (
+    Medication,
+    finish_call,
+    get_call,
+    log_message,
+    set_call_outcome,
+    upsert_thread_state,
+)
 from app.nudge import run_nudge_check
 from app.reply import handle_inbound_reply
 from app.sheet import SheetValidationError, load_medications, mark_filled
 from app.sms import send_sms
-from app.voice import VOICEMAIL_SCRIPT, next_call_action, summarize_call, verify_relay_token
+from app.voice import (
+    DISCLOSURE_GREETING,
+    VOICEMAIL_SCRIPT,
+    is_usable_utterance,
+    next_call_action,
+    summarize_call,
+    verify_relay_token,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -135,7 +149,13 @@ def _finish_call_and_notify(
         except Exception:
             logger.exception("Failed to write last_filled back to the Sheet for %s", med.med_key)
 
-    send_sms(settings, f"Call to {med.prescriber} about {med.med} {med.dose}: {summary.detail}")
+    # Logged like every other outbound body (app/reply.py does this for the SMS path) — this
+    # is the message that tells the owner what happened on the call, so it's the last one that
+    # should be missing from the messages table when reconstructing a call after the fact.
+    outcome_text = f"Call to {med.prescriber} about {med.med} {med.dose}: {summary.detail}"
+    send_sms(settings, outcome_text)
+    with get_conn(str(settings.db_file)) as conn:
+        log_message(conn, med.med_key, "out", outcome_text)
 
 
 @app.websocket("/voice/relay")
@@ -177,13 +197,33 @@ async def voice_relay(websocket: WebSocket):
 
     await websocket.accept()
 
-    turns: list[dict] = []
+    # Conversation Relay speaks DISCLOSURE_GREETING itself, before this websocket sees any
+    # caller audio — so it's genuinely our first turn and belongs in the transcript. Without
+    # it the model believes it hasn't spoken yet and opens by re-introducing itself (the
+    # callee hears the same disclosure twice, observed on the 2026-08-08 live call), and
+    # summarize_call sees a transcript in which the call never disclosed at all.
+    greeting = DISCLOSURE_GREETING.format(patient_name=settings.patient_name)
+    turns: list[dict] = [{"role": "assistant", "content": greeting}]
+    last_spoken: str = greeting
     call_control_id: str | None = None
 
     try:
         while True:
             msg = await websocket.receive_json()
             msg_type = msg.get("type")
+            # Frame-shape logging: the field names here were guessed wrong once already
+            # (see the docstring), and a silent call is impossible to diagnose without
+            # seeing what actually arrived. Keys only for non-prompt frames; prompt frames
+            # log their text too, since that's the field that was empty last time.
+            if msg_type == "prompt":
+                logger.info(
+                    "relay prompt frame: last=%r voicePrompt=%r other_keys=%s",
+                    msg.get("last"),
+                    msg.get("voicePrompt"),
+                    sorted(k for k in msg if k not in {"type", "last", "voicePrompt"}),
+                )
+            else:
+                logger.info("relay %s frame: %s", msg_type, {k: msg.get(k) for k in sorted(msg)})
 
             if msg_type == "setup":
                 call_control_id = msg.get("call_control_id") or msg.get("callControlId")
@@ -206,7 +246,8 @@ async def voice_relay(websocket: WebSocket):
                     continue
                 raw_text = msg.get("voicePrompt") or msg.get("text") or msg.get("transcript") or ""
                 caller_text = str(raw_text).strip()
-                if not caller_text:
+                if not is_usable_utterance(caller_text, last_spoken):
+                    logger.info("Ignoring non-actionable prompt frame: %r", caller_text)
                     continue
                 action = next_call_action(settings, med, turns, caller_text)
                 turns.append({"role": "user", "content": caller_text})
@@ -214,6 +255,7 @@ async def voice_relay(websocket: WebSocket):
                 if action.action == "speak":
                     text = action.text or ""
                     turns.append({"role": "assistant", "content": text})
+                    last_spoken = text
                     await websocket.send_json({"type": "text", "token": text, "last": True})
                 elif action.action == "press_digits":
                     digits = action.digits or ""

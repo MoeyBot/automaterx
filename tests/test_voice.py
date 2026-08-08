@@ -5,6 +5,7 @@ from app.db import get_conn
 from app.voice import (
     build_fact_sheet,
     build_relay_url,
+    is_usable_utterance,
     place_refill_call,
     sign_relay_token,
     verify_relay_token,
@@ -80,3 +81,31 @@ def test_place_refill_call_dials_and_persists_state(settings, one_med, monkeypat
 
     assert call_row["med_key"] == one_med.med_key
     assert thread_row["state"] == "CALLING"
+
+
+def test_usable_utterance_accepts_short_real_answers():
+    # Length is deliberately not a filter: one-word answers carry the call.
+    assert is_usable_utterance("Yes", None)
+    assert is_usable_utterance("Speaking.", None)
+    assert is_usable_utterance("No.", "Could you send that refill over?")
+
+
+def test_usable_utterance_rejects_empty_and_filler():
+    assert not is_usable_utterance("", None)
+    assert not is_usable_utterance("   ", None)
+    assert not is_usable_utterance("...", None)
+    assert not is_usable_utterance("uh", None)
+    assert not is_usable_utterance("um, uh", None)
+
+
+def test_usable_utterance_rejects_echo_of_our_own_line():
+    spoken = "Thank you, I'd like to request a refill for Metformin 500mg."
+    assert not is_usable_utterance("request a refill for Metformin", spoken)
+    # Punctuation and casing differences shouldn't defeat the match.
+    assert not is_usable_utterance("i'd like to REQUEST a refill", spoken)
+
+
+def test_usable_utterance_lets_short_echoes_through():
+    # "yes" appearing in our own last line must not suppress a real "yes" from the caller —
+    # dropping a genuine answer is worse than acting on an echo.
+    assert is_usable_utterance("yes", "Is that a yes?")
