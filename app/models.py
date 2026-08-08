@@ -163,6 +163,21 @@ def set_call_outcome(conn, provider_call_sid: str, outcome: str) -> None:
     )
 
 
+def claim_call_finalization(conn, provider_call_sid: str) -> bool:
+    """Atomically claims the right to finalize a call. False means someone already did.
+
+    Two paths can reach a finished call: /voice/relay's `finally` block, and /voice/status's
+    `call.hangup` handler (which is the only one that fires when the relay never connected at
+    all). Stamping `ended_at` conditionally is what stops both from running — which would text
+    the owner about the same call twice.
+    """
+    cur = conn.execute(
+        "UPDATE calls SET ended_at = datetime('now') WHERE provider_call_sid = ? AND ended_at IS NULL",
+        (provider_call_sid,),
+    )
+    return cur.rowcount > 0
+
+
 def finish_call(conn, provider_call_sid: str, outcome: str, transcript: str, summary: str) -> None:
     conn.execute(
         """

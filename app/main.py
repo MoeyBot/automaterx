@@ -13,6 +13,7 @@ from app.config import Settings, get_settings
 from app.db import get_conn, init_db
 from app.models import (
     Medication,
+    claim_call_finalization,
     finish_call,
     get_call,
     log_message,
@@ -122,6 +123,13 @@ async def sms_inbound(request: Request):
 # in-memory state is fine here per PLAN.md §2 (the websocket is why this isn't serverless).
 _active_relays: dict[str, WebSocket] = {}
 
+# Calls whose relay websocket has connected at some point in this process. `_active_relays`
+# can't answer "did a relay ever run for this call?" — an entry disappears when the socket
+# closes, so an absent key means either "never connected" or "already finished". The
+# call.hangup handler needs to tell those apart: only the first kind has nobody else to
+# finalize it. Same process hosts both halves by design (PLAN.md §2).
+_seen_relays: set[str] = set()
+
 
 async def _send_voicemail_and_close(websocket: WebSocket, settings: Settings, med: Medication) -> None:
     script = VOICEMAIL_SCRIPT.format(
@@ -138,6 +146,14 @@ async def _send_voicemail_and_close(websocket: WebSocket, settings: Settings, me
 def _finish_call_and_notify(
     settings: Settings, med: Medication, call_control_id: str, turns: list[dict]
 ) -> None:
+    with get_conn(str(settings.db_file)) as conn:
+        # Only an existing-but-already-finalized row means someone else handled this. A
+        # missing row is a different problem, and staying silent about a finished call is
+        # worse than a duplicate text, so fall through and notify.
+        if get_call(conn, call_control_id) is not None and not claim_call_finalization(conn, call_control_id):
+            logger.info("Call %s was already finalized; skipping", call_control_id)
+            return
+
     summary = summarize_call(settings, med, turns)
 
     with get_conn(str(settings.db_file)) as conn:
@@ -157,6 +173,38 @@ def _finish_call_and_notify(
     send_sms(settings, outcome_text)
     with get_conn(str(settings.db_file)) as conn:
         log_message(conn, med.med_key, "out", outcome_text)
+
+
+def _finish_unconnected_call(settings: Settings, call_control_id: str) -> None:
+    """Closes out a call whose relay websocket never connected.
+
+    Observed live on 2026-08-08: a bad conversation_relay_config made Telnyx answer the call,
+    run AMD, then hang up without ever starting Conversation Relay. Nothing finalized the
+    call — the thread sat in CALLING forever (so no future nudge could fire for that
+    medication) and the owner never heard back, having just been texted that a call was
+    starting. There's no transcript to summarize here, so the outcome is recorded directly
+    rather than via summarize_call.
+    """
+    with get_conn(str(settings.db_file)) as conn:
+        call_row = get_call(conn, call_control_id)
+        if call_row is None or not claim_call_finalization(conn, call_control_id):
+            return
+        med_key = call_row["med_key"]
+        # AMD may already have recorded an interim outcome — don't discard what it learned.
+        outcome = call_row["outcome"] or "failed"
+        detail = (
+            "reached voicemail, and no message could be left"
+            if outcome == "voicemail"
+            else "didn't connect properly, so nothing was requested"
+        )
+        finish_call(conn, call_control_id, outcome, json.dumps([]), detail)
+        upsert_thread_state(conn, med_key, "FAILED")
+
+    logger.warning("Call %s ended with no relay connection (outcome=%s)", call_control_id, outcome)
+    text = f"The refill call for {med_key} {detail}. You may want to call yourself."
+    send_sms(settings, text)
+    with get_conn(str(settings.db_file)) as conn:
+        log_message(conn, med_key, "out", text)
 
 
 @app.websocket("/voice/relay")
@@ -230,6 +278,7 @@ async def voice_relay(websocket: WebSocket):
                 call_control_id = msg.get("call_control_id") or msg.get("callControlId")
                 if call_control_id:
                     _active_relays[call_control_id] = websocket
+                    _seen_relays.add(call_control_id)
                     with get_conn(str(settings.db_file)) as conn:
                         call_row = get_call(conn, call_control_id)
                     if call_row and call_row["outcome"] == "voicemail":
@@ -333,5 +382,10 @@ async def voice_status(request: Request):
                         await _send_voicemail_and_close(websocket, settings, med)
                 except SheetValidationError:
                     logger.exception("Sheet unreadable while handling an AMD result")
+
+    elif event_type == "call.hangup" and call_control_id not in _seen_relays:
+        # A relay that connected finalizes the call itself when its websocket closes; this
+        # only covers calls where one never connected, which is the case nothing else sees.
+        _finish_unconnected_call(settings, call_control_id)
 
     return Response(status_code=200)

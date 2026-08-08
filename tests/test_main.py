@@ -5,6 +5,7 @@ from telnyx.lib.webhooks_ed25519 import WebhookVerificationError
 
 import app.main as main_mod
 from app.db import get_conn
+from app.models import create_call, set_call_outcome, upsert_thread_state
 from app.voice import (
     DISCLOSURE_GREETING,
     INTERRUPTION_MARKER,
@@ -172,3 +173,89 @@ def test_relay_interrupt_frame_reaches_the_transcript(settings, one_med, monkeyp
     assert len(seen) == 1
     greeting_turn = seen[0][0]
     assert greeting_turn["content"] == f"Hi, this is an auto {INTERRUPTION_MARKER}"
+
+
+def _hangup_event(call_control_id: str):
+    return SimpleNamespace(
+        data=SimpleNamespace(
+            event_type="call.hangup",
+            payload=SimpleNamespace(call_control_id=call_control_id),
+        )
+    )
+
+
+def _status_client(settings, monkeypatch, event, sent_messages):
+    monkeypatch.setattr(main_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_mod, "_verify_telnyx_webhook", lambda s, p, h: event)
+    monkeypatch.setattr(main_mod, "send_sms", lambda s, body, to=None: sent_messages.append(body))
+    return TestClient(main_mod.app)
+
+
+def test_hangup_without_a_relay_unwedges_the_thread(settings, one_med, monkeypatch):
+    """A call that dies before the relay connects must not leave the thread in CALLING —
+    nothing would ever nudge that medication again, and the owner was told a call started."""
+    with get_conn(str(settings.db_file)) as conn:
+        create_call(conn, one_med.med_key, "ccid-dead")
+        upsert_thread_state(conn, one_med.med_key, "CALLING")
+
+    sent = []
+    client = _status_client(settings, monkeypatch, _hangup_event("ccid-dead"), sent)
+    resp = client.post("/voice/status", content=b"{}")
+
+    assert resp.status_code == 200
+    with get_conn(str(settings.db_file)) as conn:
+        thread = conn.execute("SELECT state FROM threads WHERE med_key = ?", (one_med.med_key,)).fetchone()
+        call = conn.execute(
+            "SELECT outcome, ended_at FROM calls WHERE provider_call_sid = ?", ("ccid-dead",)
+        ).fetchone()
+
+    assert thread["state"] == "FAILED"
+    assert call["outcome"] == "failed"
+    assert call["ended_at"] is not None
+    assert len(sent) == 1, "the owner must be told the call failed"
+
+
+def test_hangup_preserves_an_amd_voicemail_outcome(settings, one_med, monkeypatch):
+    with get_conn(str(settings.db_file)) as conn:
+        create_call(conn, one_med.med_key, "ccid-vm")
+        set_call_outcome(conn, "ccid-vm", "voicemail")
+
+    sent = []
+    client = _status_client(settings, monkeypatch, _hangup_event("ccid-vm"), sent)
+    client.post("/voice/status", content=b"{}")
+
+    with get_conn(str(settings.db_file)) as conn:
+        call = conn.execute("SELECT outcome FROM calls WHERE provider_call_sid = ?", ("ccid-vm",)).fetchone()
+    assert call["outcome"] == "voicemail", "AMD's finding must not be overwritten with 'failed'"
+
+
+def test_hangup_is_idempotent(settings, one_med, monkeypatch):
+    with get_conn(str(settings.db_file)) as conn:
+        create_call(conn, one_med.med_key, "ccid-twice")
+
+    sent = []
+    client = _status_client(settings, monkeypatch, _hangup_event("ccid-twice"), sent)
+    client.post("/voice/status", content=b"{}")
+    client.post("/voice/status", content=b"{}")
+
+    assert len(sent) == 1, "a repeated hangup webhook must not text the owner twice"
+
+
+def test_hangup_defers_to_a_relay_that_connected(settings, one_med, monkeypatch):
+    """The relay finalizes its own calls when the socket closes — hangup must not race it."""
+    with get_conn(str(settings.db_file)) as conn:
+        create_call(conn, one_med.med_key, "ccid-live")
+    main_mod._seen_relays.add("ccid-live")
+    try:
+        sent = []
+        client = _status_client(settings, monkeypatch, _hangup_event("ccid-live"), sent)
+        client.post("/voice/status", content=b"{}")
+    finally:
+        main_mod._seen_relays.discard("ccid-live")
+
+    assert sent == []
+    with get_conn(str(settings.db_file)) as conn:
+        call = conn.execute(
+            "SELECT ended_at FROM calls WHERE provider_call_sid = ?", ("ccid-live",)
+        ).fetchone()
+    assert call["ended_at"] is None, "the relay's finally block owns finalization here"
