@@ -3,9 +3,10 @@ import logging
 from app.config import Settings
 from app.db import get_conn
 from app.intent import classify_reply
-from app.models import get_active_thread, log_message, recent_messages, set_snooze, upsert_thread_state
+from app.models import get_active_thread, log_message, recent_messages, set_snooze
 from app.nudge import local_today
 from app.sheet import SheetValidationError, load_medications
+from app.voice import place_refill_call
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,7 @@ NO_ACTIVE_THREAD_REPLY = (
 )
 
 
-def handle_inbound_reply(settings: Settings, body: str) -> str:
+def handle_inbound_reply(settings: Settings, body: str, base_url: str) -> str:
     """Classifies an inbound SMS reply and takes the corresponding action.
 
     Returns the text sent back to the user (the caller is responsible for actually
@@ -47,11 +48,18 @@ def handle_inbound_reply(settings: Settings, body: str) -> str:
         intent = classify_reply(settings, med, history, body, today)
 
         if intent.kind == "request_refill":
-            upsert_thread_state(conn, med.med_key, "CALL_QUEUED")
-            reply = (
-                f"Got it — I'd call {med.prescriber} at {med.prescriber_phone} to request a refill "
-                f"for {med.med} {med.dose}. (Voice calling isn't wired up yet, so consider this a dry run.)"
-            )
+            try:
+                place_refill_call(settings, med, base_url, conn)
+                reply = (
+                    f"Got it — calling {med.prescriber} now to request a refill for "
+                    f"{med.med} {med.dose}. I'll text you as soon as I know how it went."
+                )
+            except Exception:
+                logger.exception("Failed to place refill call for %s", med.med_key)
+                reply = (
+                    f"I tried to call {med.prescriber} but hit a problem placing the call — "
+                    "I'll flag this so it can be looked into."
+                )
         elif intent.kind == "snooze":
             if intent.snooze_until is None:
                 reply = "Sure — when should I check back in?"

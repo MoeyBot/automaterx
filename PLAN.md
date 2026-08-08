@@ -134,12 +134,22 @@ Only your reply triggers a call. The system never dials on its own initiative.
 
 ## 5. The voice agent
 
-*Not started (M2). Voice vendor is now decided: Telnyx Conversation Relay. The safety design
-below (fact sheet, disclosure, recording, phone trees, voicemail, after-call summary) was
-written vendor-agnostically and still holds unchanged from the original Twilio-based design.*
+*Code written (`app/voice.py`, plus `/voice/relay` and `/voice/status` in `app/main.py`). One
+real call to a controlled number has been placed, proving the dial → relay → token path; the
+"human answers and talks" path still needs a clean re-test, and the phone-tree and voicemail
+paths haven't been exercised at all — see milestone M2 step 6.*
+
+*On the websocket's JSON field names: the docs site wasn't fetchable and search kept surfacing
+Twilio's differently-named fields, so the first implementation guessed Telnyx's snake_case
+convention and got it wrong — every caller turn arrived empty. The inbound shapes are now
+confirmed against Telnyx's own example app
+(`github.com/team-telnyx/telnyx-code-examples`, `conversation-relay-voice-bot-python/app.py`):
+caller speech is `voicePrompt` (camelCase), partial vs. final utterances are distinguished by
+`last`, DTMF is `digit`. Outbound `sendDigits`/`end` shapes and the AMD field names in
+`/voice/status` are still unverified — that example doesn't cover them.*
 
 ### Call setup
-`client.calls.dial(...)` with `answering_machine_detection` set (e.g. `"detect"`) and
+`client.calls.dial(...)` with `answering_machine_detection="premium"` and
 `conversation_relay_config={"url": "wss://.../voice/relay", "dtmf_detection": True, "greeting": ...}`
 embedded directly in the dial call — no separate call-control-markup fetch step, unlike
 Twilio's TwiML model. `webhook_url` on the same call gets call status events
@@ -196,9 +206,13 @@ say "try again" — which just re-queues it.
 - Webhook signature validation on `/sms/inbound` and `/voice/status` — Telnyx signs all
   webhooks the same way (Ed25519), so `_verify_telnyx_webhook` in `app/main.py` should cover
   both once voice lands, not need a second implementation
-- `/voice/relay` websocket authenticated by a signed one-time token in the `wss://` URL, bound
-  to the call's `call_control_id` — Conversation Relay doesn't sign the websocket connection
-  itself, so this token is on us to generate and check
+- `/voice/relay` websocket authenticated by a signed one-time token in the `wss://` URL —
+  Conversation Relay doesn't sign the websocket connection itself, so this is on us. Can't
+  bind to `call_control_id` as originally planned: Telnyx's `dial()` only returns that ID
+  *after* the call is placed, but the relay URL has to be ready *before* `dial()` is called.
+  Instead: mint a random `rid` locally before dialing, sign `HMAC(RELAY_SIGNING_SECRET, rid.med_key)`,
+  and put `rid`/`med_key`/`token` in the URL's query string — `app/voice.py:
+  sign_relay_token` / `verify_relay_token`
 - Single-number allowlist for anything that causes an action
 - Secrets via `fly secrets` (`OWNER_PHONE`, `PATIENT_NAME`, `PATIENT_DOB`, `PHARMACY_*`,
   `TELNYX_*`, `ANTHROPIC_API_KEY`, `GOOGLE_SA_JSON`) — never committed, never in the Sheet

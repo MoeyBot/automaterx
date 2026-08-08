@@ -27,7 +27,7 @@ def _client(settings, monkeypatch, event=None, valid_signature=True, sent_messag
         return event
 
     monkeypatch.setattr(main_mod, "_verify_telnyx_webhook", _verify)
-    monkeypatch.setattr(main_mod, "handle_inbound_reply", lambda s, body: "here's your answer")
+    monkeypatch.setattr(main_mod, "handle_inbound_reply", lambda s, body, base_url: "here's your answer")
 
     if sent_messages is not None:
         monkeypatch.setattr(main_mod, "send_sms", lambda s, body, to=None: sent_messages.append(body))

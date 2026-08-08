@@ -71,12 +71,15 @@ def _worksheet(settings: Settings):
 
 def load_medications(settings: Settings) -> list[Medication]:
     ws = _worksheet(settings)
-    return parse_records(ws.get_all_records())
+    # numericise_ignore=["all"]: gspread otherwise auto-converts anything that looks numeric,
+    # including phone numbers like "+17082978600" — int("+17082978600") succeeds and silently
+    # drops the leading "+". Every field here is cast explicitly in _row_to_medication anyway.
+    return parse_records(ws.get_all_records(numericise_ignore=["all"]))
 
 
 def mark_filled(settings: Settings, med_key: str, filled_on: date) -> None:
     ws = _worksheet(settings)
-    records = ws.get_all_records()
+    records = ws.get_all_records(numericise_ignore=["all"])
     headers = ws.row_values(1)
     col = headers.index("last_filled") + 1
     for i, row in enumerate(records, start=2):

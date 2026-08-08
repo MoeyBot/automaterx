@@ -138,3 +138,37 @@ def recent_messages(conn, med_key: str, limit: int = 10) -> list[dict]:
         (med_key, limit),
     ).fetchall()
     return [dict(r) for r in reversed(rows)]
+
+
+def create_call(conn, med_key: str, provider_call_sid: str) -> None:
+    conn.execute(
+        "INSERT INTO calls (med_key, provider_call_sid) VALUES (?, ?)",
+        (med_key, provider_call_sid),
+    )
+
+
+def get_call(conn, provider_call_sid: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM calls WHERE provider_call_sid = ? ORDER BY id DESC LIMIT 1",
+        (provider_call_sid,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def set_call_outcome(conn, provider_call_sid: str, outcome: str) -> None:
+    """Sets an interim outcome (e.g. 'voicemail') while the call is still in progress."""
+    conn.execute(
+        "UPDATE calls SET outcome = ? WHERE provider_call_sid = ?",
+        (outcome, provider_call_sid),
+    )
+
+
+def finish_call(conn, provider_call_sid: str, outcome: str, transcript: str, summary: str) -> None:
+    conn.execute(
+        """
+        UPDATE calls
+        SET outcome = ?, transcript = ?, summary = ?, ended_at = datetime('now')
+        WHERE provider_call_sid = ?
+        """,
+        (outcome, transcript, summary, provider_call_sid),
+    )
