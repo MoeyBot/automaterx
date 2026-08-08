@@ -160,8 +160,8 @@ def test_interruption_before_any_assistant_turn_is_a_noop():
     assert turns == []
 
 
-def test_dial_locks_the_greeting_against_interruption(settings, one_med, monkeypatch):
-    """The greeting carries the disclosure — a callee must not be able to talk over it."""
+def test_dial_omits_the_relay_interruption_fields(settings, one_med, monkeypatch):
+    """The greeting carries the disclosure, but locking it breaks Conversation Relay outright."""
     dial_calls = []
 
     class FakeCalls:
@@ -178,8 +178,10 @@ def test_dial_locks_the_greeting_against_interruption(settings, one_med, monkeyp
         place_refill_call(settings, one_med, BASE_URL, conn)
 
     config = dial_calls[0]["conversation_relay_config"]
-    assert config["interruptible_greeting"] == "none"
     assert config["greeting"] == DISCLOSURE_GREETING.format(patient_name=settings.patient_name)
-    # The agent's later speech must stay interruptible — locking the whole call would make it
-    # talk over people rather than protect anything.
-    assert config.get("interruptible", "any") != "none"
+    # Regression guard: sending interruptible_greeting stops Conversation Relay from starting
+    # at all (2026-08-08 08:12 — dial 200s, then no call.conversation.created and a silent
+    # 20s call), despite the SDK's generated types documenting the field. Until that's
+    # resolved against the live API, keeping it out of the payload is what keeps calls working.
+    assert "interruptible_greeting" not in config
+    assert "interruption_settings" not in config
