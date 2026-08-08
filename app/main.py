@@ -175,6 +175,41 @@ def _finish_call_and_notify(
         log_message(conn, med.med_key, "out", outcome_text)
 
 
+async def _run_agent_turn(
+    websocket: WebSocket, settings: Settings, med: Medication, turns: list[dict], caller_text: str
+) -> tuple[bool, str | None]:
+    """Runs one turn of the call: decide, record, send. Returns (call_should_end, text_spoken).
+
+    Speech and DTMF both come through here. They used to be handled separately, and the DTMF
+    branch only appended to `turns` without ever asking the model what to do — so a caller who
+    pressed a key instead of talking got dead air until they spoke (observed live 2026-08-08:
+    the callee pressed 1, the agent said nothing at all, and the call died with a two-line
+    transcript).
+    """
+    action = next_call_action(settings, med, turns, caller_text)
+    turns.append({"role": "user", "content": caller_text})
+
+    if action.action == "speak":
+        text = action.text or ""
+        turns.append({"role": "assistant", "content": text})
+        await websocket.send_json({"type": "text", "token": text, "last": True})
+        return False, text
+
+    if action.action == "press_digits":
+        digits = action.digits or ""
+        turns.append({"role": "assistant", "content": f"[pressed {digits}]"})
+        # The sendDigits shape is still unverified — Telnyx's example app only ever sends
+        # `text`, and an unrecognized field elsewhere in this API silently broke a whole call
+        # rather than erroring. Log what goes out so a failure here is diagnosable.
+        logger.info("Sending outbound frame: %s", {"type": "sendDigits", "digits": digits})
+        await websocket.send_json({"type": "sendDigits", "digits": digits})
+        return False, None
+
+    turns.append({"role": "assistant", "content": "[ending call]"})
+    await websocket.send_json({"type": "end"})
+    return True, None
+
+
 def _finish_unconnected_call(settings: Settings, call_control_id: str) -> None:
     """Closes out a call whose relay websocket never connected.
 
@@ -299,26 +334,27 @@ async def voice_relay(websocket: WebSocket):
                 if not is_usable_utterance(caller_text, last_spoken):
                     logger.info("Ignoring non-actionable prompt frame: %r", caller_text)
                     continue
-                action = next_call_action(settings, med, turns, caller_text)
-                turns.append({"role": "user", "content": caller_text})
-
-                if action.action == "speak":
-                    text = action.text or ""
-                    turns.append({"role": "assistant", "content": text})
-                    last_spoken = text
-                    await websocket.send_json({"type": "text", "token": text, "last": True})
-                elif action.action == "press_digits":
-                    digits = action.digits or ""
-                    turns.append({"role": "assistant", "content": f"[pressed {digits}]"})
-                    await websocket.send_json({"type": "sendDigits", "digits": digits})
-                else:  # end_call
-                    turns.append({"role": "assistant", "content": "[ending call]"})
-                    await websocket.send_json({"type": "end"})
+                ended, spoken = await _run_agent_turn(websocket, settings, med, turns, caller_text)
+                if spoken is not None:
+                    last_spoken = spoken
+                if ended:
                     break
 
             elif msg_type == "dtmf":
+                # `digit` confirmed live 2026-08-08; `digits` kept as a harmless fallback.
                 digit = msg.get("digit") or msg.get("digits") or ""
-                turns.append({"role": "user", "content": f"[caller pressed {digit}]"})
+                if not digit:
+                    continue
+                # Each keypress is its own turn, so someone entering several digits in a row
+                # produces several model calls. Acceptable here: we're the caller, so digits
+                # pressed at us are rare and usually single ("press 1 if you're a human").
+                ended, spoken = await _run_agent_turn(
+                    websocket, settings, med, turns, f"[caller pressed {digit}]"
+                )
+                if spoken is not None:
+                    last_spoken = spoken
+                if ended:
+                    break
 
             elif msg_type == "interrupt":
                 # The caller talked over our TTS. There's nothing queued to cancel, but the

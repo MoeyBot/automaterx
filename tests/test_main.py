@@ -259,3 +259,89 @@ def test_hangup_defers_to_a_relay_that_connected(settings, one_med, monkeypatch)
             "SELECT ended_at FROM calls WHERE provider_call_sid = ?", ("ccid-live",)
         ).fetchone()
     assert call["ended_at"] is None, "the relay's finally block owns finalization here"
+
+
+def test_dtmf_gets_a_response_like_speech(settings, one_med, monkeypatch):
+    """A keypress must drive a turn. It used to only append to the transcript, so a caller who
+    pressed a key instead of talking got dead air (observed live 2026-08-08).
+
+    The trailing prompt is deliberate: it guarantees the socket produces a frame either way, so
+    reintroducing the bug fails this test on the assertion instead of blocking on receive_json.
+    """
+    seen = []
+
+    def _next_action(s, med, turns, caller_text):
+        seen.append(caller_text)
+        return CallAction(action="speak", text="Thanks, one moment.")
+
+    monkeypatch.setattr(main_mod, "next_call_action", _next_action)
+    summary = CallSummary(outcome="unclear", detail="n/a")
+    sent = []
+    client = _relay_client(settings, one_med, monkeypatch, None, summary, sent)
+
+    with client.websocket_connect(_relay_url(settings, one_med)) as ws:
+        ws.send_json({"type": "setup", "call_control_id": "ccid-dtmf"})
+        ws.send_json({"type": "dtmf", "digit": "1"})
+        ws.send_json({"type": "prompt", "last": True, "voicePrompt": "Still there?"})
+        reply = ws.receive_json()
+
+    assert seen[0] == "[caller pressed 1]", "the digit must reach the model, before the speech does"
+    assert reply == {"type": "text", "token": "Thanks, one moment.", "last": True}
+
+
+def test_dtmf_can_end_the_call(settings, one_med, monkeypatch):
+    seen = []
+
+    def _next_action(s, med, turns, caller_text):
+        seen.append(caller_text)
+        return CallAction(action="end_call")
+
+    monkeypatch.setattr(main_mod, "next_call_action", _next_action)
+    summary = CallSummary(outcome="unclear", detail="n/a")
+    sent = []
+    client = _relay_client(settings, one_med, monkeypatch, None, summary, sent)
+
+    with client.websocket_connect(_relay_url(settings, one_med)) as ws:
+        ws.send_json({"type": "setup", "call_control_id": "ccid-dtmf-end"})
+        ws.send_json({"type": "dtmf", "digit": "9"})
+        ws.send_json({"type": "prompt", "last": True, "voicePrompt": "Still there?"})
+        assert ws.receive_json() == {"type": "end"}
+
+    # The end must have come from the digit, not from the trailing prompt.
+    assert seen == ["[caller pressed 9]"]
+
+
+def test_press_digits_action_sends_senddigits(settings, one_med, monkeypatch):
+    """The outbound frame shape is still unverified against Telnyx — this only pins what we
+    send, so a change to it is deliberate rather than accidental."""
+    monkeypatch.setattr(
+        main_mod, "next_call_action", lambda s, m, t, c: CallAction(action="press_digits", digits="1")
+    )
+    summary = CallSummary(outcome="unclear", detail="n/a")
+    sent = []
+    client = _relay_client(settings, one_med, monkeypatch, None, summary, sent)
+
+    with client.websocket_connect(_relay_url(settings, one_med)) as ws:
+        ws.send_json({"type": "setup", "call_control_id": "ccid-press"})
+        ws.send_json({"type": "prompt", "last": True, "voicePrompt": "Press 1 for refills."})
+        assert ws.receive_json() == {"type": "sendDigits", "digits": "1"}
+
+
+def test_empty_dtmf_frame_is_ignored(settings, one_med, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        main_mod,
+        "next_call_action",
+        lambda s, m, t, c: calls.append(c) or CallAction(action="end_call"),
+    )
+    summary = CallSummary(outcome="unclear", detail="n/a")
+    sent = []
+    client = _relay_client(settings, one_med, monkeypatch, None, summary, sent)
+
+    with client.websocket_connect(_relay_url(settings, one_med)) as ws:
+        ws.send_json({"type": "setup", "call_control_id": "ccid-empty"})
+        ws.send_json({"type": "dtmf"})
+        ws.send_json({"type": "prompt", "last": True, "voicePrompt": "Anyone there?"})
+        ws.receive_json()
+
+    assert calls == ["Anyone there?"], "a digitless dtmf frame must not burn a model call"
