@@ -282,6 +282,14 @@ def place_refill_call(settings: Settings, med: Medication, base_url: str, conn) 
             "url": relay_url,
             "dtmf_detection": True,
             "greeting": greeting,
+            # The greeting IS the disclosure (PLAN.md §5), so it must not be talkable-over:
+            # on the 2026-08-08 live call the callee barged in 341ms into it, which on a real
+            # office call means staff never learn they're speaking to an automated system.
+            # Only the greeting is locked — the agent's later turns stay interruptible, since
+            # a caller who can't interrupt mid-call is worse to deal with, not better.
+            # Key and enum confirmed against the SDK's generated ConversationRelayEmbeddedConfigParam
+            # (from Telnyx's OpenAPI spec), not guessed.
+            "interruptible_greeting": "none",
         },
     )
     call_control_id = resp.data.call_control_id

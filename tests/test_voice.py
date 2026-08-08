@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import app.voice as voice_mod
 from app.db import get_conn
 from app.voice import (
+    DISCLOSURE_GREETING,
     INTERRUPTION_MARKER,
     apply_interruption,
     build_fact_sheet,
@@ -157,3 +158,28 @@ def test_interruption_before_any_assistant_turn_is_a_noop():
     turns: list[dict] = []
     apply_interruption(turns, "anything")
     assert turns == []
+
+
+def test_dial_locks_the_greeting_against_interruption(settings, one_med, monkeypatch):
+    """The greeting carries the disclosure — a callee must not be able to talk over it."""
+    dial_calls = []
+
+    class FakeCalls:
+        def dial(self, **kwargs):
+            dial_calls.append(kwargs)
+            return SimpleNamespace(data=SimpleNamespace(call_control_id="fake_ccid"))
+
+    class FakeTelnyxClient:
+        def __init__(self, api_key):
+            self.calls = FakeCalls()
+
+    monkeypatch.setattr(voice_mod, "Telnyx", FakeTelnyxClient)
+    with get_conn(str(settings.db_file)) as conn:
+        place_refill_call(settings, one_med, BASE_URL, conn)
+
+    config = dial_calls[0]["conversation_relay_config"]
+    assert config["interruptible_greeting"] == "none"
+    assert config["greeting"] == DISCLOSURE_GREETING.format(patient_name=settings.patient_name)
+    # The agent's later speech must stay interruptible — locking the whole call would make it
+    # talk over people rather than protect anything.
+    assert config.get("interruptible", "any") != "none"
