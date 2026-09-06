@@ -1,3 +1,5 @@
+[README](README.md) · [Architecture](ARCHITECTURE.md) · [Workflow](WORKFLOW.md) · [Plan](PLAN.md) · [CLAUDE.md](CLAUDE.md)
+
 # automaterx — Project Plan
 
 An SMS agent that watches your prescription refill dates, texts you before you run out,
