@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 
 from app.config import Settings
 from app.db import get_conn
+from app.followup import next_followup_time, now_utc
 from app.models import get_thread, log_message, mark_nudged
 from app.sheet import SheetValidationError, load_medications
 from app.sms import send_sms
@@ -58,7 +59,7 @@ def run_nudge_check(settings: Settings) -> list[str]:
             )
             send_sms(settings, body)
             log_message(conn, med.med_key, "out", body)
-            mark_nudged(conn, med.med_key)
+            mark_nudged(conn, med.med_key, next_followup_time(settings, now_utc()))
             nudged.append(med.med_key)
 
     return nudged

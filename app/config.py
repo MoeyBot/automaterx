@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     timezone: str = "America/Chicago"
     nudge_hour_local: int = 9  # 24h, local to `timezone`
 
+    # Follow-up texts for an AWAITING_REPLY thread that's gone quiet.
+    followup_min_hours: float = 4.0
+    followup_max_hours: float = 8.0
+    followup_cap_days: int = 5  # elapsed since the *original* nudge, not the last follow-up
+    followup_window_start_hour: int = 9  # 24h, local to `timezone`
+    followup_window_end_hour: int = 21
+
     db_path: str = "automaterx.db"
 
     max_calls_per_day: int = 5

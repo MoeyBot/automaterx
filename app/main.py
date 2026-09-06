@@ -5,12 +5,14 @@ from datetime import date
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from telnyx import Telnyx
 from telnyx.lib.webhooks_ed25519 import WebhookVerificationError, unwrap_with_ed25519
 
 from app.config import Settings, get_settings
 from app.db import get_conn, init_db
+from app.followup import run_followup_check
 from app.models import (
     Medication,
     claim_call_finalization,
@@ -52,9 +54,16 @@ async def lifespan(app: FastAPI):
         id="daily_nudge_check",
         replace_existing=True,
     )
+    scheduler.add_job(
+        run_followup_check,
+        IntervalTrigger(minutes=30),
+        args=[settings],
+        id="followup_check",
+        replace_existing=True,
+    )
     scheduler.start()
     logger.info(
-        "Scheduler started, daily nudge check at %02d:00 %s",
+        "Scheduler started, daily nudge check at %02d:00 %s, follow-up check every 30 min",
         settings.nudge_hour_local,
         settings.timezone,
     )

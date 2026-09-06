@@ -51,18 +51,30 @@ class Thread(BaseModel):
     state: str = "IDLE"
     snooze_until: date | None = None
     last_nudged_at: datetime | None = None
+    first_nudged_at: datetime | None = None
+    next_followup_at: datetime | None = None
+    followup_final_sent: bool = False
+    pending_fill_date: date | None = None
+
+
+def _row_to_thread(row) -> Thread:
+    return Thread(
+        med_key=row["med_key"],
+        state=row["state"],
+        snooze_until=date.fromisoformat(row["snooze_until"]) if row["snooze_until"] else None,
+        last_nudged_at=datetime.fromisoformat(row["last_nudged_at"]) if row["last_nudged_at"] else None,
+        first_nudged_at=datetime.fromisoformat(row["first_nudged_at"]) if row["first_nudged_at"] else None,
+        next_followup_at=datetime.fromisoformat(row["next_followup_at"]) if row["next_followup_at"] else None,
+        followup_final_sent=bool(row["followup_final_sent"]),
+        pending_fill_date=date.fromisoformat(row["pending_fill_date"]) if row["pending_fill_date"] else None,
+    )
 
 
 def get_thread(conn, med_key: str) -> Thread | None:
     row = conn.execute("SELECT * FROM threads WHERE med_key = ?", (med_key,)).fetchone()
     if row is None:
         return None
-    return Thread(
-        med_key=row["med_key"],
-        state=row["state"],
-        snooze_until=date.fromisoformat(row["snooze_until"]) if row["snooze_until"] else None,
-        last_nudged_at=datetime.fromisoformat(row["last_nudged_at"]) if row["last_nudged_at"] else None,
-    )
+    return _row_to_thread(row)
 
 
 def upsert_thread_state(conn, med_key: str, state: str) -> None:
@@ -75,17 +87,82 @@ def upsert_thread_state(conn, med_key: str, state: str) -> None:
     )
 
 
-def mark_nudged(conn, med_key: str) -> None:
+def mark_nudged(conn, med_key: str, next_followup_at: datetime | None = None) -> None:
+    next_followup_str = next_followup_at.isoformat(sep=" ") if next_followup_at else None
     conn.execute(
         """
-        INSERT INTO threads (med_key, state, last_nudged_at, updated_at)
-        VALUES (?, 'AWAITING_REPLY', datetime('now'), datetime('now'))
+        INSERT INTO threads
+            (med_key, state, last_nudged_at, first_nudged_at,
+             next_followup_at, followup_final_sent, updated_at)
+        VALUES (?, 'AWAITING_REPLY', datetime('now'), datetime('now'), ?, 0, datetime('now'))
         ON CONFLICT(med_key) DO UPDATE SET
             state = 'AWAITING_REPLY',
             last_nudged_at = datetime('now'),
+            first_nudged_at = datetime('now'),
+            next_followup_at = excluded.next_followup_at,
+            followup_final_sent = 0,
             updated_at = datetime('now')
         """,
+        (med_key, next_followup_str),
+    )
+
+
+def get_threads_due_for_followup(conn, now: datetime) -> list[Thread]:
+    """AWAITING_REPLY threads whose next follow-up time has arrived and haven't hit the cap."""
+    rows = conn.execute(
+        """
+        SELECT * FROM threads
+        WHERE state = 'AWAITING_REPLY'
+          AND followup_final_sent = 0
+          AND next_followup_at IS NOT NULL
+          AND next_followup_at <= ?
+        """,
+        (now.isoformat(sep=" "),),
+    ).fetchall()
+    return [_row_to_thread(row) for row in rows]
+
+
+def set_next_followup_at(conn, med_key: str, next_at: datetime | None) -> None:
+    """Reschedules the next follow-up without sending anything — used both right after a
+    follow-up goes out and when an in-between reply (question/unclear) resets the clock."""
+    conn.execute(
+        """
+        UPDATE threads
+        SET last_nudged_at = datetime('now'), next_followup_at = ?, updated_at = datetime('now')
+        WHERE med_key = ?
+        """,
+        (next_at.isoformat(sep=" ") if next_at else None, med_key),
+    )
+
+
+def mark_followup_final_sent(conn, med_key: str) -> None:
+    conn.execute(
+        "UPDATE threads SET followup_final_sent = 1, updated_at = datetime('now') WHERE med_key = ?",
         (med_key,),
+    )
+
+
+def set_pending_fill(conn, med_key: str, pending_date: date) -> None:
+    conn.execute(
+        """
+        INSERT INTO threads (med_key, state, pending_fill_date, updated_at)
+        VALUES (?, 'AWAITING_FILL_CONFIRMATION', ?, datetime('now'))
+        ON CONFLICT(med_key) DO UPDATE SET
+            state = 'AWAITING_FILL_CONFIRMATION',
+            pending_fill_date = excluded.pending_fill_date,
+            updated_at = datetime('now')
+        """,
+        (med_key, pending_date.isoformat()),
+    )
+
+
+def resolve_pending_fill(conn, med_key: str, new_state: str) -> None:
+    conn.execute(
+        """
+        UPDATE threads SET state = ?, pending_fill_date = NULL, updated_at = datetime('now')
+        WHERE med_key = ?
+        """,
+        (new_state, med_key),
     )
 
 
@@ -113,23 +190,23 @@ def log_message(conn, med_key: str | None, direction: str, body: str) -> None:
 def get_active_thread(conn) -> Thread | None:
     """The thread an incoming reply with no other context should be attributed to.
 
-    Prefers a thread that's actively awaiting a decision; falls back to whichever
-    thread was touched most recently, so a bare question ("what's the dose again?")
-    still resolves to the medication you were just talking about.
+    Prefers an open fill-date confirmation (the most specific thing the very next reply is
+    answering), then a thread that's actively awaiting a decision, then falls back to whichever
+    thread was touched most recently, so a bare question ("what's the dose again?") still
+    resolves to the medication you were just talking about.
     """
     row = conn.execute(
-        "SELECT * FROM threads WHERE state = 'AWAITING_REPLY' ORDER BY last_nudged_at DESC LIMIT 1"
+        "SELECT * FROM threads WHERE state = 'AWAITING_FILL_CONFIRMATION' ORDER BY updated_at DESC LIMIT 1"
     ).fetchone()
+    if row is None:
+        row = conn.execute(
+            "SELECT * FROM threads WHERE state = 'AWAITING_REPLY' ORDER BY last_nudged_at DESC LIMIT 1"
+        ).fetchone()
     if row is None:
         row = conn.execute("SELECT * FROM threads ORDER BY updated_at DESC LIMIT 1").fetchone()
     if row is None:
         return None
-    return Thread(
-        med_key=row["med_key"],
-        state=row["state"],
-        snooze_until=date.fromisoformat(row["snooze_until"]) if row["snooze_until"] else None,
-        last_nudged_at=datetime.fromisoformat(row["last_nudged_at"]) if row["last_nudged_at"] else None,
-    )
+    return _row_to_thread(row)
 
 
 def recent_messages(conn, med_key: str, limit: int = 10) -> list[dict]:
