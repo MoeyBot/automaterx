@@ -1,0 +1,18 @@
+.git/
+.github/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+
+# Secrets — never bake these into an image layer. Fly gets them via `fly secrets set`.
+.env
+*.db
+google-service-account.json
+
+tests/
+README.md
+PLAN.md
+CLAUDE.md
