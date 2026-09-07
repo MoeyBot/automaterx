@@ -317,5 +317,10 @@ def place_refill_call(settings: Settings, med: Medication, base_url: str, conn) 
     create_call(conn, med.med_key, call_control_id)
     upsert_thread_state(conn, med.med_key, "CALLING")
 
-    logger.info("Placed refill call for %s: call_control_id=%s", med.med_key, call_control_id)
+    logger.info(
+        "Placed refill call for %s: call_control_id=%s",
+        med.med_key,
+        call_control_id,
+        extra={"event": "call_placed", "med_key": med.med_key, "call_control_id": call_control_id},
+    )
     return call_control_id

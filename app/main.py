@@ -13,6 +13,7 @@ from telnyx.lib.webhooks_ed25519 import WebhookVerificationError, unwrap_with_ed
 from app.config import Settings, get_settings
 from app.db import get_conn, init_db
 from app.followup import run_followup_check
+from app.logging_config import configure_logging
 from app.models import (
     Medication,
     claim_call_finalization,
@@ -36,7 +37,7 @@ from app.voice import (
     verify_relay_token,
 )
 
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler()
@@ -304,19 +305,36 @@ async def voice_relay(websocket: WebSocket):
         while True:
             msg = await websocket.receive_json()
             msg_type = msg.get("type")
-            # Frame-shape logging: the field names here were guessed wrong once already
-            # (see the docstring), and a silent call is impossible to diagnose without
-            # seeing what actually arrived. Keys only for non-prompt frames; prompt frames
-            # log their text too, since that's the field that was empty last time.
+            # Frame-shape logging: the field names here were guessed wrong once already (see
+            # the docstring), and a silent call is impossible to diagnose without seeing what
+            # actually arrived — but the caller's actual words are what they said to a live
+            # human on a call about their prescriptions, so only its presence/length is logged,
+            # never the content itself.
             if msg_type == "prompt":
+                voice_prompt = msg.get("voicePrompt")
                 logger.info(
-                    "relay prompt frame: last=%r voicePrompt=%r other_keys=%s",
+                    "relay prompt frame: last=%r has_voice_prompt=%s other_keys=%s",
                     msg.get("last"),
-                    msg.get("voicePrompt"),
+                    bool(voice_prompt),
                     sorted(k for k in msg if k not in {"type", "last", "voicePrompt"}),
+                    extra={
+                        "event": "relay_frame",
+                        "call_control_id": call_control_id,
+                        "frame_type": msg_type,
+                        "voice_prompt_len": len(voice_prompt) if voice_prompt else 0,
+                    },
                 )
             else:
-                logger.info("relay %s frame: %s", msg_type, {k: msg.get(k) for k in sorted(msg)})
+                logger.info(
+                    "relay %s frame: %s",
+                    msg_type,
+                    {k: msg.get(k) for k in sorted(msg)},
+                    extra={
+                        "event": "relay_frame",
+                        "call_control_id": call_control_id,
+                        "frame_type": msg_type,
+                    },
+                )
 
             if msg_type == "setup":
                 call_control_id = msg.get("call_control_id") or msg.get("callControlId")

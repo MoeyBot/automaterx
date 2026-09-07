@@ -106,12 +106,21 @@ def _handle_decision_reply(
                 f"{med.med} {med.dose}. I'll text you as soon as I know how it went."
             )
         except CallCapExceeded:
+            logger.warning(
+                "Refill call blocked by daily cap for %s",
+                med.med_key,
+                extra={"event": "call_cap_exceeded", "med_key": med.med_key},
+            )
             reply = (
                 f"I've already placed {settings.max_calls_per_day} calls today, my daily limit — "
                 "I'll hold off until tomorrow, or you can text me again then."
             )
         except Exception:
-            logger.exception("Failed to place refill call for %s", med.med_key)
+            logger.exception(
+                "Failed to place refill call for %s",
+                med.med_key,
+                extra={"event": "call_placement_failed", "med_key": med.med_key},
+            )
             reply = (
                 f"I tried to call {med.prescriber} but hit a problem placing the call — "
                 "I'll flag this so it can be looked into."
