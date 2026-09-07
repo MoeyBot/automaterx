@@ -3,16 +3,24 @@ import hmac
 import logging
 import re
 import secrets
+from datetime import UTC, datetime
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from anthropic import Anthropic
 from pydantic import BaseModel
 from telnyx import Telnyx
 
 from app.config import Settings
-from app.models import Medication, create_call, upsert_thread_state
+from app.models import Medication, count_calls_since, create_call, upsert_thread_state
 
 logger = logging.getLogger(__name__)
+
+
+class CallCapExceeded(Exception):
+    """Raised when MAX_CALLS_PER_DAY has already been reached — a bug (or a chatty reply loop)
+    must not be able to dial a prescriber's office an unbounded number of times in one day."""
+
 
 MODEL = "claude-sonnet-5"
 
@@ -260,6 +268,12 @@ def build_relay_url(base_url: str, secret: str, rid: str, med_key: str) -> str:
     return f"{wss_base}/voice/relay?rid={rid}&med_key={med_key}&token={token}"
 
 
+def _start_of_today_utc(settings: Settings) -> datetime:
+    tz = ZoneInfo(settings.timezone)
+    local_midnight = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    return local_midnight.astimezone(UTC).replace(tzinfo=None)
+
+
 def place_refill_call(settings: Settings, med: Medication, base_url: str, conn) -> str:
     """Places the outbound refill-request call. Returns the Telnyx call_control_id.
 
@@ -267,6 +281,12 @@ def place_refill_call(settings: Settings, med: Medication, base_url: str, conn) 
     hold a connection mid-transaction when this fires, and SQLite only allows one writer at a
     time, so a second connection here would deadlock against the caller's uncommitted writes.
     """
+    placed_today = count_calls_since(conn, _start_of_today_utc(settings))
+    if placed_today >= settings.max_calls_per_day:
+        raise CallCapExceeded(
+            f"{placed_today} calls already placed today (limit {settings.max_calls_per_day})"
+        )
+
     rid = secrets.token_hex(16)
     relay_url = build_relay_url(base_url, settings.relay_signing_secret, rid, med.med_key)
     greeting = DISCLOSURE_GREETING.format(patient_name=settings.patient_name)

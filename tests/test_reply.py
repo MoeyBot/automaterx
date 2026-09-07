@@ -4,6 +4,7 @@ import app.reply as reply_mod
 from app.db import get_conn
 from app.intent import FillConfirmation, Intent
 from app.models import mark_nudged, set_pending_fill
+from app.voice import CallCapExceeded
 
 BASE_URL = "https://example.trycloudflare.com"
 
@@ -257,3 +258,29 @@ def test_ambiguous_name_match_falls_back_to_active_thread(settings, one_med, mon
             "SELECT med_key FROM messages WHERE direction = 'out' ORDER BY id DESC LIMIT 1"
         ).fetchone()
         assert row["med_key"] == one_med.med_key
+
+
+def test_request_refill_call_cap_gives_graceful_reply(settings, one_med, monkeypatch):
+    _seed_awaiting_reply(settings, one_med.med_key)
+    monkeypatch.setattr(reply_mod, "load_medications", lambda s: [one_med])
+    monkeypatch.setattr(reply_mod, "classify_reply", lambda *a, **k: Intent(kind="request_refill"))
+
+    def capped_place_refill_call(*args, **kwargs):
+        raise CallCapExceeded("5 calls already placed today (limit 5)")
+
+    monkeypatch.setattr(reply_mod, "place_refill_call", capped_place_refill_call)
+
+    result = reply_mod.handle_inbound_reply(settings, "yes call them", BASE_URL)
+
+    assert str(settings.max_calls_per_day) in result
+    assert "tomorrow" in result.lower()
+
+
+def test_sheet_unreachable_gives_graceful_reply(settings, monkeypatch):
+    def broken_load(s):
+        raise ConnectionError("Google Sheets API is down")
+
+    monkeypatch.setattr(reply_mod, "load_medications", broken_load)
+
+    result = reply_mod.handle_inbound_reply(settings, "yes", BASE_URL)
+    assert "can't reach" in result.lower()

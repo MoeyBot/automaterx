@@ -18,7 +18,7 @@ from app.models import (
 )
 from app.nudge import local_today
 from app.sheet import SheetValidationError, load_medications, mark_filled
-from app.voice import place_refill_call
+from app.voice import CallCapExceeded, place_refill_call
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,9 @@ def handle_inbound_reply(settings: Settings, body: str, base_url: str) -> str:
             "Your med sheet has a problem right now — I'll flag it, "
             "but can't look anything up until it's fixed."
         )
+    except Exception:
+        logger.exception("Failed to load the Sheet (not a validation error)")
+        return "I can't reach your med sheet right now — try again in a bit."
 
     with get_conn(str(settings.db_file)) as conn:
         log_message(conn, None, "in", body)
@@ -101,6 +104,11 @@ def _handle_decision_reply(
             reply = (
                 f"Got it — calling {med.prescriber} now to request a refill for "
                 f"{med.med} {med.dose}. I'll text you as soon as I know how it went."
+            )
+        except CallCapExceeded:
+            reply = (
+                f"I've already placed {settings.max_calls_per_day} calls today, my daily limit — "
+                "I'll hold off until tomorrow, or you can text me again then."
             )
         except Exception:
             logger.exception("Failed to place refill call for %s", med.med_key)

@@ -224,6 +224,14 @@ def create_call(conn, med_key: str, provider_call_sid: str) -> None:
     )
 
 
+def count_calls_since(conn, since: datetime) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM calls WHERE started_at >= ?",
+        (since.isoformat(sep=" "),),
+    ).fetchone()
+    return row["n"]
+
+
 def get_call(conn, provider_call_sid: str) -> dict | None:
     row = conn.execute(
         "SELECT * FROM calls WHERE provider_call_sid = ? ORDER BY id DESC LIMIT 1",

@@ -69,6 +69,12 @@ def run_followup_check(settings: Settings) -> list[str]:
     except SheetValidationError as e:
         logger.error("Sheet validation failed, skipping follow-up check: %s", e.row_errors)
         return []
+    except Exception:
+        # Silent (unlike run_nudge_check): this runs every 30 minutes, so texting the owner
+        # here would spam them for as long as the Sheet is unreachable. The once-daily nudge
+        # check is where a "can't reach the Sheet" text belongs.
+        logger.exception("Failed to load the Sheet (not a validation error) — skipping follow-up check")
+        return []
 
     med_by_key = {med.med_key: med for med in meds}
     now = now_utc()

@@ -34,6 +34,10 @@ def run_nudge_check(settings: Settings) -> list[str]:
         errors = "; ".join(e.row_errors)
         send_sms(settings, f"⚠️ Your med sheet has bad rows, fix and I'll retry tomorrow:\n{errors}")
         return []
+    except Exception:
+        logger.exception("Failed to load the Sheet (not a validation error) — skipping nudge check")
+        send_sms(settings, "⚠️ Couldn't reach your med sheet just now — I'll retry tomorrow.")
+        return []
 
     today = local_today(settings)
     nudged: list[str] = []

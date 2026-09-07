@@ -124,3 +124,19 @@ def test_medication_missing_from_sheet_is_skipped(settings, one_med, monkeypatch
     followed_up = followup_mod.run_followup_check(settings)
     assert followed_up == []
     assert sent == []
+
+
+def test_sheet_unreachable_fails_silently(settings, monkeypatch):
+    """Unlike run_nudge_check, this runs every 30 min — it must not text the owner every time
+    the Sheet happens to be unreachable."""
+
+    def _raise(s):
+        raise ConnectionError("Google Sheets API is down")
+
+    sent = []
+    monkeypatch.setattr(followup_mod, "load_medications", _raise)
+    monkeypatch.setattr(followup_mod, "send_sms", lambda s, body: sent.append(body))
+
+    followed_up = followup_mod.run_followup_check(settings)
+    assert followed_up == []
+    assert sent == []

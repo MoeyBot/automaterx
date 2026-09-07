@@ -24,7 +24,7 @@ from app.models import (
 )
 from app.nudge import run_nudge_check
 from app.reply import handle_inbound_reply
-from app.sheet import SheetValidationError, load_medications, mark_filled
+from app.sheet import load_medications, mark_filled
 from app.sms import send_sms
 from app.voice import (
     DISCLOSURE_GREETING,
@@ -277,7 +277,7 @@ async def voice_relay(websocket: WebSocket):
 
     try:
         meds = load_medications(settings)
-    except SheetValidationError:
+    except Exception:
         logger.exception("Sheet unreadable while starting a call for %s", med_key)
         await websocket.close(code=4500)
         return
@@ -425,7 +425,7 @@ async def voice_status(request: Request):
                     med = next((m for m in meds if m.med_key == call_row["med_key"]), None)
                     if med is not None:
                         await _send_voicemail_and_close(websocket, settings, med)
-                except SheetValidationError:
+                except Exception:
                     logger.exception("Sheet unreadable while handling an AMD result")
 
     elif event_type == "call.hangup" and call_control_id not in _seen_relays:

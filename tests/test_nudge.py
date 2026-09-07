@@ -77,3 +77,17 @@ def test_sheet_validation_error_alerts_owner_instead_of_crashing(settings, monke
     assert nudged == []
     assert len(sent) == 1
     assert "bad status" in sent[0]
+
+
+def test_sheet_unreachable_alerts_owner_instead_of_crashing(settings, monkeypatch):
+    def _raise(s):
+        raise ConnectionError("Google Sheets API is down")
+
+    sent = []
+    monkeypatch.setattr(nudge_mod, "load_medications", _raise)
+    monkeypatch.setattr(nudge_mod, "send_sms", lambda s, body: sent.append(body))
+
+    nudged = nudge_mod.run_nudge_check(settings)
+    assert nudged == []
+    assert len(sent) == 1
+    assert "couldn't reach" in sent[0].lower()

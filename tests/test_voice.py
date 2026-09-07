@@ -1,10 +1,14 @@
 from types import SimpleNamespace
 
+import pytest
+
 import app.voice as voice_mod
 from app.db import get_conn
+from app.models import create_call
 from app.voice import (
     DISCLOSURE_GREETING,
     INTERRUPTION_MARKER,
+    CallCapExceeded,
     apply_interruption,
     build_fact_sheet,
     build_relay_url,
@@ -84,6 +88,80 @@ def test_place_refill_call_dials_and_persists_state(settings, one_med, monkeypat
 
     assert call_row["med_key"] == one_med.med_key
     assert thread_row["state"] == "CALLING"
+
+
+def test_place_refill_call_blocked_by_daily_cap(settings, one_med, monkeypatch):
+    dial_calls = []
+
+    class FakeCalls:
+        def dial(self, **kwargs):
+            dial_calls.append(kwargs)
+            return SimpleNamespace(data=SimpleNamespace(call_control_id="fake_ccid"))
+
+    class FakeTelnyxClient:
+        def __init__(self, api_key):
+            self.calls = FakeCalls()
+
+    monkeypatch.setattr(voice_mod, "Telnyx", FakeTelnyxClient)
+
+    with get_conn(str(settings.db_file)) as conn:
+        for i in range(settings.max_calls_per_day):
+            create_call(conn, one_med.med_key, f"prior_call_{i}")
+
+        with pytest.raises(CallCapExceeded):
+            place_refill_call(settings, one_med, BASE_URL, conn)
+
+    assert dial_calls == []
+
+
+def test_place_refill_call_allowed_just_under_cap(settings, one_med, monkeypatch):
+    dial_calls = []
+
+    class FakeCalls:
+        def dial(self, **kwargs):
+            dial_calls.append(kwargs)
+            return SimpleNamespace(data=SimpleNamespace(call_control_id="fake_ccid"))
+
+    class FakeTelnyxClient:
+        def __init__(self, api_key):
+            self.calls = FakeCalls()
+
+    monkeypatch.setattr(voice_mod, "Telnyx", FakeTelnyxClient)
+
+    with get_conn(str(settings.db_file)) as conn:
+        for i in range(settings.max_calls_per_day - 1):
+            create_call(conn, one_med.med_key, f"prior_call_{i}")
+
+        call_control_id = place_refill_call(settings, one_med, BASE_URL, conn)
+
+    assert call_control_id == "fake_ccid"
+    assert len(dial_calls) == 1
+
+
+def test_place_refill_call_ignores_calls_from_before_today(settings, one_med, monkeypatch):
+    dial_calls = []
+
+    class FakeCalls:
+        def dial(self, **kwargs):
+            dial_calls.append(kwargs)
+            return SimpleNamespace(data=SimpleNamespace(call_control_id="fake_ccid"))
+
+    class FakeTelnyxClient:
+        def __init__(self, api_key):
+            self.calls = FakeCalls()
+
+    monkeypatch.setattr(voice_mod, "Telnyx", FakeTelnyxClient)
+
+    with get_conn(str(settings.db_file)) as conn:
+        for i in range(settings.max_calls_per_day):
+            create_call(conn, one_med.med_key, f"old_call_{i}")
+        # Backdate them well before today so they don't count against today's cap.
+        conn.execute("UPDATE calls SET started_at = datetime('now', '-2 days')")
+
+        call_control_id = place_refill_call(settings, one_med, BASE_URL, conn)
+
+    assert call_control_id == "fake_ccid"
+    assert len(dial_calls) == 1
 
 
 def test_usable_utterance_accepts_short_real_answers():
