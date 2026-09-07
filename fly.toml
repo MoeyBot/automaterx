@@ -1,39 +1,35 @@
-# Fly app name must be globally unique — change this if "automaterx" is already taken
-# (`fly apps create <name>` will tell you, or just edit this before `fly launch`/`fly deploy`).
-app = "automaterx"
-primary_region = "ord"
+# fly.toml app configuration file generated for automaterx on 2026-09-06T19:01:49-05:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'automaterx'
+primary_region = 'ord'
 
 [build]
-
 [env]
-  DB_PATH = "/data/automaterx.db"
-  GOOGLE_SERVICE_ACCOUNT_JSON = "/app/google-service-account.json"
-  PORT = "8080"
+  DB_PATH = '/data/automaterx.db'
+  GOOGLE_SERVICE_ACCOUNT_JSON = '/app/google-service-account.json'
+  PORT = '8080'
 
-# SQLite lives on this volume so it survives deploys/restarts. Create it once with:
-#   fly volumes create automaterx_data --region ord --size 1
 [[mounts]]
-  source = "automaterx_data"
-  destination = "/data"
+  source = 'automaterx_data'
+  destination = '/data'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  # This process also runs the in-process APScheduler (daily nudge + follow-up checks) and
-  # holds live /voice/relay websockets — it must never be scaled to zero or those stop firing
-  # silently. See CLAUDE.md/PLAN.md: one always-on process is a deliberate design choice, not
-  # an oversight.
-  auto_stop_machines = false
+  auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
 
   [[http_service.checks]]
-    grace_period = "10s"
-    interval = "30s"
-    method = "GET"
-    timeout = "5s"
-    path = "/health"
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/health'
 
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "256mb"
+  size = 'shared-cpu-1x'
+  memory = '256mb'
